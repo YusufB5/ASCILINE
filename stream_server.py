@@ -15,8 +15,8 @@ import subprocess
 import json
 import numpy as np
 import cv2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import os
@@ -26,6 +26,90 @@ from websockets.exceptions import ConnectionClosed
 from ascii_video_player2 import VideoDecoder, AsciiMapper
 
 app = FastAPI()
+
+MIN_COLS = 1
+MAX_COLS = 1200
+MIN_ROWS = 0
+MAX_ROWS = 800
+MAX_CELLS = 500_000
+MIN_VOL = 0
+MAX_VOL = 5
+VALID_MODES = {1, 2, 3, 4, 5}
+SUPPORTED_VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".webm")
+
+
+def field_label(context: str, name: str) -> str:
+    return f"{context}: {name}" if context else name
+
+
+def validate_int_range(name: str, value: object, min_value: int, max_value: int, context: str = "") -> int:
+    """Validate plain integers, excluding bool which is an int subclass."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_label(context, name)} must be an integer")
+    if value < min_value or value > max_value:
+        raise ValueError(f"{field_label(context, name)} must be between {min_value} and {max_value}")
+    return value
+
+
+def validate_bool(name: str, value: object, context: str = "") -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_label(context, name)} must be true or false")
+    return value
+
+
+def validate_dimensions(cols: int, rows: int, context: str = "") -> None:
+    validate_int_range("cols", cols, MIN_COLS, MAX_COLS, context)
+    validate_int_range("rows", rows, MIN_ROWS, MAX_ROWS, context)
+    if rows > 0 and cols * rows > MAX_CELLS:
+        prefix = f"{context}: " if context else ""
+        raise ValueError(f"{prefix}grid size {cols}x{rows} exceeds the {MAX_CELLS} cell limit")
+
+
+def validate_queue_entry(entry: dict, index: int | None = None) -> dict:
+    context = f"playlist entry {index + 1}" if index is not None else "queue entry"
+    if not isinstance(entry, dict):
+        raise ValueError(f"{context} must be an object")
+
+    normalized = dict(entry)
+    video = normalized.get("video")
+    if not isinstance(video, str) or not video.strip():
+        raise ValueError(f"{field_label(context, 'video')} must be a non-empty string")
+    normalized["video"] = video
+
+    normalized["mode"] = validate_int_range("mode", normalized.get("mode"), 1, 5, context)
+    if normalized["mode"] not in VALID_MODES:
+        raise ValueError(f"{field_label(context, 'mode')} must be one of 1, 2, 3, 4, 5")
+
+    normalized["pixel"] = validate_bool("pixel", normalized.get("pixel"), context)
+    if normalized["pixel"] and normalized["mode"] == 1:
+        raise ValueError(f"{context}: pixel mode requires color mode 2-5")
+
+    normalized["vol"] = validate_int_range("vol", normalized.get("vol"), MIN_VOL, MAX_VOL, context)
+    normalized["cols"] = validate_int_range("cols", normalized.get("cols"), MIN_COLS, MAX_COLS, context)
+    normalized["rows"] = validate_int_range("rows", normalized.get("rows"), MIN_ROWS, MAX_ROWS, context)
+    validate_dimensions(normalized["cols"], normalized["rows"], context)
+    return normalized
+
+
+def normalize_queue_entry(raw_entry: dict, args, index: int | None = None) -> dict:
+    context = f"playlist entry {index + 1}" if index is not None else "queue entry"
+    if not isinstance(raw_entry, dict):
+        raise ValueError(f"{context} must be an object")
+
+    entry = dict(raw_entry)
+    entry.setdefault("mode", args.mode)
+    entry.setdefault("vol", args.vol)
+    entry.setdefault("pixel", args.pixel)
+
+    is_pixel = entry.get("pixel") is True
+    default_cols = args.cols if args.cols is not None else (450 if is_pixel else 200)
+    entry.setdefault("cols", default_cols)
+    entry.setdefault("rows", args.rows)
+
+    if isinstance(entry.get("video"), str):
+        entry["video"] = resolve_video_path(entry["video"])
+
+    return validate_queue_entry(entry, index)
 
 
 def get_video_dimensions(path: str) -> tuple[int, int]:
@@ -82,8 +166,8 @@ def load_playlist(playlist_path: str) -> list[dict]:
     """Loads playlist from a JSON file and resolves all video paths."""
     with open(playlist_path, "r", encoding="utf-8") as f:
         items = json.load(f)
-    for item in items:
-        item["video"] = resolve_video_path(item["video"])
+    if not isinstance(items, list):
+        raise ValueError("playlist must be a JSON array")
     return items
 
 def load_folder(folder_path: str, default_mode: int, default_vol: int) -> list[dict]:
@@ -91,11 +175,10 @@ def load_folder(folder_path: str, default_mode: int, default_vol: int) -> list[d
     Scans a folder for video files in filesystem order (top to bottom,
     as they appear in the directory — not alphabetically sorted).
     """
-    supported = (".mp4", ".mkv", ".avi", ".mov", ".webm")
     entries = []
     with os.scandir(folder_path) as it:
         for entry in it:
-            if entry.is_file() and entry.name.lower().endswith(supported):
+            if entry.is_file() and entry.name.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS):
                 entries.append({
                     "video": entry.path,
                     "mode":  default_mode,
@@ -114,31 +197,15 @@ def build_queue(args) -> list[dict]:
     if args.playlist:
         print(f"[PLAYLIST] Loading: {args.playlist}")
         items = load_playlist(args.playlist)
-        # Fill missing fields with global defaults
-        for item in items:
-            item.setdefault("mode", args.mode)
-            item.setdefault("vol",  args.vol)
-            item.setdefault("pixel", args.pixel)
-            
-            is_pixel = item.get("pixel", False)
-            default_cols = args.cols if args.cols is not None else (450 if is_pixel else 200)
-            item.setdefault("cols", default_cols)
-            item.setdefault("rows", args.rows)
-        return items
+        return [normalize_queue_entry(item, args, index=i) for i, item in enumerate(items)]
 
     if args.folder:
         print(f"[FOLDER] Scanning: {args.folder}")
         items = load_folder(args.folder, args.mode, args.vol)
-        default_cols = args.cols if args.cols is not None else (450 if args.pixel else 200)
-        for item in items:
-            item["pixel"] = args.pixel
-            item["cols"] = default_cols
-            item["rows"] = args.rows
-        return items
+        return [normalize_queue_entry(item, args, index=i) for i, item in enumerate(items)]
 
     # Legacy: single video argument
-    default_cols = args.cols if args.cols is not None else (450 if args.pixel else 200)
-    return [{"video": resolve_video_path(args.video), "mode": args.mode, "vol": args.vol, "pixel": args.pixel, "cols": default_cols, "rows": args.rows}]
+    return [normalize_queue_entry({"video": args.video}, args)]
 
 
 # ── APP STATE ──────────────────────────────────────────────
@@ -155,6 +222,16 @@ async def root():
 
 @app.get("/audio")
 async def audio_stream():
+    idx = getattr(app.state, "current_index", 0)
+    return audio_response_for_index(idx)
+
+
+@app.get("/audio/{queue_index}")
+async def audio_stream_for_index(queue_index: int):
+    return audio_response_for_index(queue_index)
+
+
+def audio_response_for_index(queue_index: int):
     """
     Extracts and streams audio from the currently active video entry.
     Server-side volume control via the entry's 'vol' field (0-5 scale).
@@ -163,19 +240,18 @@ async def audio_stream():
       5 = Double  (2.0x)
     """
     queue = getattr(app.state, "queue", [])
-    idx   = getattr(app.state, "current_index", 0)
-    entry = queue[idx] if queue else {}
+    if queue_index < 0 or queue_index >= len(queue):
+        raise HTTPException(status_code=404, detail="Audio entry not found")
+    entry = queue[queue_index]
 
     vol_level  = entry.get("vol", 1)
     video_path = entry.get("video", "video.mp4")
 
     # vol 0 → skip audio entirely, no FFmpeg process
     if vol_level <= 0:
-        from fastapi import Response
         return Response(status_code=204)
 
     if not os.path.exists(video_path):
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Video file not found")
 
     # Map 1-5 → 1.0x-2.0x FFmpeg volume
@@ -244,8 +320,8 @@ async def websocket_endpoint(websocket: WebSocket):
             rows_cfg   = entry.get("rows", 0)
 
             # IMPORTANT: Update current_index BEFORE sending INIT so that
-            # when the client reloads /audio in response to INIT, the endpoint
-            # already serves the correct video's audio.
+            # /status can report progress. Audio uses the per-client queue index
+            # sent in INIT rather than this global display value.
             app.state.current_index = queue_index
 
             print(f"[PLAYING] ({queue_index + 1}/{len(queue)}) {video_path}  "
@@ -269,6 +345,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 print(f"[AUTO] {vid_w}x{vid_h} → grid {cols}x{rows}")
             else:
                 rows = rows_cfg
+
+            try:
+                validate_dimensions(cols, rows)
+            except ValueError as exc:
+                await websocket.send_text(f"Error: {exc}")
+                queue_index += 1
+                if queue_index >= len(queue):
+                    if loop:
+                        queue_index = 0
+                    else:
+                        break
+                continue
 
             try:
                 decoder = VideoDecoder(video_path, cols, rows, skip_gray=pixel_mode)
@@ -299,7 +387,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 effective_fps = source_fps
             frame_t = 1.0 / effective_fps
 
-            await websocket.send_text(f"INIT:{effective_fps}:{render_mode}:{cols}:{rows}:{int(pixel_mode)}")
+            await websocket.send_text(f"INIT:{effective_fps}:{render_mode}:{cols}:{rows}:{int(pixel_mode)}:{queue_index}")
             if skip_n > 1:
                 print(f"[FPS CAP] {source_fps} FPS → {effective_fps} FPS (skip every {skip_n} frames)")
 
@@ -543,7 +631,11 @@ if __name__ == "__main__":
         exit(1)
 
     # Build the queue
-    queue = build_queue(args)
+    try:
+        queue = build_queue(args)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        exit(1)
 
     if not queue:
         print("[ERROR] No videos found. Check your --playlist / --folder / video argument.")

@@ -43,6 +43,14 @@ cd ASCILINE
 ```
 
 ### 2. Install dependencies
+For development and verification:
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest -q
+node --check app.js
+```
+
+For a quick runtime-only setup:
 ```bash
 pip install fastapi uvicorn opencv-python numpy websockets
 ```
@@ -125,6 +133,7 @@ By default, you only need to specify the width (`--cols`). ASCILINE will automat
 - **Pixel Mode Recommended:** `--cols 600` to `--cols 900` (Provides near-HD visual quality. Performance heavily depends on your machine's CPU/VRAM).
 - > **Smart Defaults:** If you do not specify a `--cols` value, ASCILINE automatically defaults to `450` when Pixel Mode is enabled, and `200` for standard ASCII text mode. 
 - > ⚠️ **Hardware Limits & A/V Sync:** If you push the `--cols` too high for your specific hardware (e.g., `1350` on a laptop vs a gaming desktop), the Python backend won't be able to encode and send the massive frames fast enough. When the video stream lags behind the audio, you will experience A/V desync (audio finishing early). If this happens, simply lower your `--cols` value!
+- ASCILINE rejects extreme grid sizes before playback to avoid accidental memory spikes. Keep `--cols` at or below `1200`, explicit `--rows` at or below `800`, and explicit grids at or below 500,000 cells.
 ```bash
 python stream_server.py video.mp4 --mode 5 --cols 240
 # Terminal will show: [AUTO] 1920x1080 → grid 240x67

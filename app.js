@@ -42,9 +42,26 @@ let selectionBuffer = null;
 let lastRenderTime = 0;
 let frameCount = 0, currentFps = 0, lastFpsUpdate = 0;
 let streamStartTime = 0;
+let renderLoopId = null;
 
 const CHAR_LUT = new Array(128);
 for (let i = 0; i < 128; i++) CHAR_LUT[i] = String.fromCharCode(i);
+
+function stopRenderLoop() {
+    if (renderLoopId !== null) {
+        cancelAnimationFrame(renderLoopId);
+        renderLoopId = null;
+    }
+}
+
+function beginRendering() {
+    if (renderLoopId !== null) return;
+    readyToRender = true;
+    streamStartTime = performance.now();
+    lastRenderTime = performance.now();
+    lastFpsUpdate = lastRenderTime;
+    renderLoopId = requestAnimationFrame(renderFrame);
+}
 
 // ═══════════════════════════════════════
 //  CANVAS SETUP
@@ -163,25 +180,20 @@ function connectWebSocket() {
                 frameInterval = 1000 / targetFps;
                 renderMode = parseInt(p[2]);
                 pixelMode = (p.length > 5 && parseInt(p[5]) === 1);
+                const parsedAudioIndex = p.length > 6 ? parseInt(p[6], 10) : 0;
+                const audioIndex = Number.isFinite(parsedAudioIndex) ? parsedAudioIndex : 0;
                 buildCanvas(parseInt(p[3]), parseInt(p[4]));
 
                 // ── AUDIO READY GATE ──
                 // Buffer video frames but don't render until audio is ready.
                 // This prevents the 0.5s initial stutter.
+                stopRenderLoop();
                 readyToRender = false;
                 state = 'PLAYING';
 
-                const beginRendering = () => {
-                    readyToRender = true;
-                    streamStartTime = performance.now();
-                    lastRenderTime = performance.now();
-                    lastFpsUpdate = lastRenderTime;
-                    requestAnimationFrame(renderFrame);
-                };
-
                 if (audioEl) {
                     audioEl.pause();
-                    audioEl.src = '/audio?' + Date.now();
+                    audioEl.src = `/audio/${audioIndex}?` + Date.now();
                     audioEl.volume = volumeSlider ? volumeSlider.value : 1.0;
                     audioEl.load();
                     audioEl.play().catch(() => {});
@@ -246,8 +258,9 @@ function connectWebSocket() {
 // ═══════════════════════════════════════
 
 function renderFrame(now) {
+    renderLoopId = null;
     if (state !== 'PLAYING' || !readyToRender) return;
-    requestAnimationFrame(renderFrame);
+    renderLoopId = requestAnimationFrame(renderFrame);
 
     // ── MASTER CLOCK LOGIC ──
     let masterClock;
@@ -340,6 +353,7 @@ function renderFrame(now) {
 
 function finishStream() {
     state = 'IDLE';
+    stopRenderLoop();
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     if (audioEl) { audioEl.pause(); audioEl.src = ''; }
     ctx.clearRect(0, 0, canvas.width, canvas.height);

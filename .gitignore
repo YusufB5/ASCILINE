@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 
 # Video files (too large for GitHub, user provides their own)
 *.mp4
