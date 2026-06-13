@@ -21,6 +21,7 @@ let ws = null;
 const frameBuffer = [];
 const BUFFER_SIZE = 4;
 let codecDecoder = null; // Adaptive codec decoder (codec.js)
+let decodeChain = Promise.resolve(); // serializes stateful codec decodes in arrival order
 let targetFps = 24;
 let frameInterval = 1000 / targetFps;
 let renderMode = 1;
@@ -165,6 +166,9 @@ function connectWebSocket() {
                 frameInterval = 1000 / targetFps;
                 renderMode = parseInt(p[2]);
                 pixelMode = (p.length > 5 && parseInt(p[5]) === 1);
+                // 7th field (added server-side) = current queue index, so /audio
+                // serves THIS client's video even when other clients are connected.
+                const videoIndex = (p.length > 6 && !Number.isNaN(parseInt(p[6]))) ? parseInt(p[6]) : 0;
                 buildCanvas(parseInt(p[3]), parseInt(p[4]));
 
                 // Initialize adaptive codec decoder (pixel=3 bytes, ASCII color=4 bytes)
@@ -173,6 +177,13 @@ function connectWebSocket() {
                 } else {
                     codecDecoder = null;
                 }
+
+                // New segment (single video, or the next entry in a playlist):
+                // drop frames still buffered from the previous segment. Their
+                // timestamps belong to the old master clock (which resets when the
+                // audio reloads below), so keeping them stalls A/V sync — and on a
+                // mode change they'd be decoded under the wrong renderer.
+                frameBuffer.length = 0;
 
                 // ── AUDIO READY GATE ──
                 // Buffer video frames but don't render until audio is ready.
@@ -190,7 +201,7 @@ function connectWebSocket() {
 
                 if (audioEl) {
                     audioEl.pause();
-                    audioEl.src = '/audio?' + Date.now();
+                    audioEl.src = '/audio?v=' + videoIndex + '&t=' + Date.now();
                     audioEl.volume = volumeSlider ? volumeSlider.value : 1.0;
                     audioEl.load();
                     audioEl.play().catch(() => {});
@@ -222,10 +233,20 @@ function connectWebSocket() {
         } else {
             // Binary Frames — decoded via adaptive codec (raw/zlib/delta)
             if (codecDecoder) {
-                codecDecoder.decode(event.data).then(({ frameIndex, frame }) => {
-                    const frameTime = frameIndex / targetFps;
-                    frameBuffer.push({ data: frame, time: frameTime });
-                });
+                // The codec is STATEFUL: a DELTA frame patches the previously
+                // decoded frame, so decodes MUST run in arrival order. decode()
+                // awaits a real async DecompressionStream, so firing them
+                // concurrently lets a small DELTA resolve before an earlier
+                // keyframe and patch a stale frame. Serialize through a chain.
+                const data = event.data;
+                const dec  = codecDecoder;
+                decodeChain = decodeChain.then(async () => {
+                    if (dec !== codecDecoder) return; // stream re-INIT'd → drop stale frame
+                    const { frameIndex, frame } = await dec.decode(data);
+                    frameBuffer.push({ data: frame, time: frameIndex / targetFps });
+                    // Cap here (not only in the sync path) since this push is async.
+                    while (frameBuffer.length > BUFFER_SIZE * 5) frameBuffer.shift();
+                }).catch((err) => { console.error('ASCILINE decode error:', err); });
             } else {
                 // Fallback: legacy 4-byte header
                 const buffer = event.data;

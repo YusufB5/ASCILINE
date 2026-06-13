@@ -15,11 +15,11 @@ import subprocess
 import json
 import numpy as np
 import cv2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 import uvicorn
 import os
+from urllib.parse import urlparse
 from websockets.exceptions import ConnectionClosed
 
 # Import the existing engine (ascii_video_player2.py)
@@ -32,12 +32,14 @@ app = FastAPI()
 def get_video_dimensions(path: str) -> tuple[int, int]:
     """Quickly probe a video file to get (width, height) without decoding frames."""
     cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Could not open video file: {path!r}")
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-    return w, h
+    try:
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Could not open video file: {path!r}")
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return w, h
+    finally:
+        cap.release()
 
 
 def calc_auto_rows(cols: int, vid_w: int, vid_h: int, pixel_mode: bool) -> int:
@@ -52,9 +54,18 @@ def calc_auto_rows(cols: int, vid_w: int, vid_h: int, pixel_mode: bool) -> int:
     else:
         return max(1, round(cols / ratio / 2))
 
-# Serve static files (style.css, app.js) from the project directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-app.mount("/static", StaticFiles(directory=BASE_DIR), name="static")
+STATIC_FILES = {"app.js", "style.css", "codec.js"}
+
+
+@app.get("/static/{filename}")
+async def static_file(filename: str):
+    if filename not in STATIC_FILES:
+        raise HTTPException(status_code=404)
+    path = os.path.join(BASE_DIR, filename)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404)
+    return FileResponse(path)
 
 def get_html_content():
     html_path = os.path.join(os.path.dirname(__file__), "index.html")
@@ -79,11 +90,85 @@ def resolve_video_path(video: str) -> str:
             return path
     return video  # Return original; error will be caught during playback
 
+def _coerce_int(value, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _coerce_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in ("1", "true", "yes", "on"):
+            return True
+        if value in ("0", "false", "no", "off"):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+def normalize_queue_entry(
+    entry: dict,
+    default_mode: int,
+    default_vol: int,
+    default_pixel: bool,
+    default_cols: int,
+    default_rows: int,
+) -> dict:
+    """Normalizes per-video settings before playback allocates buffers."""
+    mode = _coerce_int(entry.get("mode", default_mode), 1)
+    if mode not in {1, 2, 3, 4, 5}:
+        mode = 1
+
+    vol = max(0, min(5, _coerce_int(entry.get("vol", default_vol), default_vol)))
+    pixel = _coerce_bool(entry.get("pixel", default_pixel), default_pixel)
+    cols = max(1, min(1000, _coerce_int(entry.get("cols", default_cols), default_cols)))
+    rows = max(0, min(1000, _coerce_int(entry.get("rows", default_rows), default_rows)))
+
+    entry["mode"] = mode
+    entry["vol"] = vol
+    entry["pixel"] = pixel
+    entry["cols"] = cols
+    entry["rows"] = rows
+    return entry
+
+def _origin_allowed(origin: str | None, host_header: str | None = None) -> bool:
+    if not origin:
+        return True  # non-browser clients / test harness send no Origin
+    try:
+        origin_host = urlparse(origin).hostname
+    except ValueError:
+        return False
+    if origin_host in {"localhost", "127.0.0.1"}:
+        return True
+    # Same-origin: the page was served by THIS server. Covers LAN mode
+    # (--host 0.0.0.0), where the Origin host is the server's own LAN IP, not
+    # localhost — while still rejecting a cross-site page whose Origin won't
+    # match the Host the victim's browser connected to.
+    if host_header and origin_host == host_header.split(":")[0]:
+        return True
+    return False
+
 def load_playlist(playlist_path: str) -> list[dict]:
     """Loads playlist from a JSON file and resolves all video paths."""
-    with open(playlist_path, "r", encoding="utf-8") as f:
-        items = json.load(f)
-    for item in items:
+    try:
+        with open(playlist_path, "r", encoding="utf-8") as f:
+            items = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[ERROR] Could not load playlist {playlist_path!r}: {exc}")
+        exit(1)
+    if not isinstance(items, list):
+        print("[ERROR] Playlist must be a JSON list of entries.")
+        exit(1)
+    for i, item in enumerate(items, 1):
+        if not isinstance(item, dict) or not isinstance(item.get("video"), str) or not item.get("video"):
+            print(f"[ERROR] Playlist entry {i} is missing a valid 'video' field.")
+            exit(1)
         item["video"] = resolve_video_path(item["video"])
     return items
 
@@ -115,16 +200,10 @@ def build_queue(args) -> list[dict]:
     if args.playlist:
         print(f"[PLAYLIST] Loading: {args.playlist}")
         items = load_playlist(args.playlist)
-        # Fill missing fields with global defaults
         for item in items:
-            item.setdefault("mode", args.mode)
-            item.setdefault("vol",  args.vol)
-            item.setdefault("pixel", args.pixel)
-            
-            is_pixel = item.get("pixel", False)
+            is_pixel = _coerce_bool(item.get("pixel", args.pixel), args.pixel)
             default_cols = args.cols if args.cols is not None else (450 if is_pixel else 200)
-            item.setdefault("cols", default_cols)
-            item.setdefault("rows", args.rows)
+            normalize_queue_entry(item, args.mode, args.vol, args.pixel, default_cols, args.rows)
         return items
 
     if args.folder:
@@ -132,14 +211,20 @@ def build_queue(args) -> list[dict]:
         items = load_folder(args.folder, args.mode, args.vol)
         default_cols = args.cols if args.cols is not None else (450 if args.pixel else 200)
         for item in items:
-            item["pixel"] = args.pixel
-            item["cols"] = default_cols
-            item["rows"] = args.rows
+            normalize_queue_entry(item, args.mode, args.vol, args.pixel, default_cols, args.rows)
         return items
 
     # Legacy: single video argument
     default_cols = args.cols if args.cols is not None else (450 if args.pixel else 200)
-    return [{"video": resolve_video_path(args.video), "mode": args.mode, "vol": args.vol, "pixel": args.pixel, "cols": default_cols, "rows": args.rows}]
+    entry = {
+        "video": resolve_video_path(args.video),
+        "mode": args.mode,
+        "vol": args.vol,
+        "pixel": args.pixel,
+        "cols": default_cols,
+        "rows": args.rows,
+    }
+    return [normalize_queue_entry(entry, args.mode, args.vol, args.pixel, default_cols, args.rows)]
 
 
 # ── APP STATE ──────────────────────────────────────────────
@@ -155,7 +240,7 @@ async def root():
 
 
 @app.get("/audio")
-async def audio_stream():
+async def audio_stream(v: int | None = None):
     """
     Extracts and streams audio from the currently active video entry.
     Server-side volume control via the entry's 'vol' field (0-5 scale).
@@ -165,7 +250,9 @@ async def audio_stream():
     """
     queue = getattr(app.state, "queue", [])
     idx   = getattr(app.state, "current_index", 0)
-    entry = queue[idx] if queue else {}
+    if v is not None and 0 <= v < len(queue):
+        idx = v
+    entry = queue[idx] if queue and 0 <= idx < len(queue) else {}
 
     vol_level  = entry.get("vol", 1)
     video_path = entry.get("video", "video.mp4")
@@ -186,6 +273,7 @@ async def audio_stream():
         process = subprocess.Popen(
             [
                 "ffmpeg",
+                "-nostdin",
                 "-i", video_path,
                 "-vn",
                 "-filter:a", f"volume={ffmpeg_vol}",
@@ -207,7 +295,12 @@ async def audio_stream():
                 yield chunk
         finally:
             process.stdout.close()
-            process.wait()
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
     return StreamingResponse(
         audio_generator(),
@@ -229,6 +322,10 @@ async def websocket_endpoint(websocket: WebSocket):
     # the original uncompressed binary protocol, byte-for-byte unchanged.
     adaptive = websocket.query_params.get("codec") == "adaptive"
     tolerance = getattr(app.state, "tolerance", 0)  # lossy colour drift budget
+    origin = websocket.headers.get("origin")
+    if not _origin_allowed(origin, websocket.headers.get("host")):
+        await websocket.close(code=1008)
+        return
 
     queue = getattr(app.state, "queue", [])
     loop  = getattr(app.state, "loop", False)
@@ -305,7 +402,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 effective_fps = source_fps
             frame_t = 1.0 / effective_fps
 
-            await websocket.send_text(f"INIT:{effective_fps}:{render_mode}:{cols}:{rows}:{int(pixel_mode)}")
+            await websocket.send_text(f"INIT:{effective_fps}:{render_mode}:{cols}:{rows}:{int(pixel_mode)}:{queue_index}")
             if skip_n > 1:
                 print(f"[FPS CAP] {source_fps} FPS → {effective_fps} FPS (skip every {skip_n} frames)")
 
@@ -587,6 +684,7 @@ if __name__ == "__main__":
 
     # ── Server ──
     srv = parser.add_argument_group('\033[33mServer\033[0m')
+    srv.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1; use 0.0.0.0 to expose on LAN)")
     srv.add_argument("--port", type=int, default=8000, help="Server port (default: 8000)")
     srv.add_argument("--debug", action="store_true", default=False, help="Enable bandwidth debug logging (RAW vs WIRE)")
 
@@ -661,10 +759,8 @@ if __name__ == "__main__":
         target=uvicorn.run,
         args=(app,),
         kwargs={
-            "host": "0.0.0.0",
+            "host": args.host,
             "port": args.port,
-            "ws_ping_interval": None,
-            "ws_ping_timeout": None,
             "log_level": "warning",
         },
         daemon=True
