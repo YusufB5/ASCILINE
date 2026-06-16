@@ -1,6 +1,60 @@
-# 🌌 ASCILINE Engine
+# 🌌 ASCILINE Engine with Export
 
 **ASCILINE** is a high-performance, cross-platform real-time ASCII video rendering engine. **Our core objective is to transform the web into a highly dynamic and interactive typographic canvas.** By mapping pixels to text-based representations, we unlock new possibilities for web media delivery.
+
+## 💾 Export to Static Files (`export_ascii.py`)
+
+Export any video to two portable static files — no server or WebSocket required:
+
+| File | Contents |
+| :--- | :--- |
+| `output.txt` | Plain ASCII frames separated by dividers. Human-readable, terminal-pipeable, embeddable in `.md`. |
+| `output.ascjson` | Compact JSON with per-cell color data: `{"meta":{cols,rows,fps},"frames":[[char,r,g,b,...]...]}`. Feeds the web player widget directly. |
+
+Place `export_ascii.py` in the ASCILINE folder (next to `ascii_video_player2.py`), then:
+
+```bash
+# Basic — outputs video.txt + video.ascjson
+python export_ascii.py video.mp4
+
+# Custom output name
+python export_ascii.py video.mp4 -o my_export
+
+# Custom grid size (rows auto-calculated if omitted)
+python export_ascii.py video.mp4 --cols 120 --rows 34
+
+# Cap output FPS (default: 24)
+python export_ascii.py video.mp4 --max-fps 12
+
+# Text only, skip the color JSON
+python export_ascii.py video.mp4 --no-color
+
+# Suppress progress output
+python export_ascii.py video.mp4 --quiet
+```
+
+### Web Player Widget
+
+Load an `.ascjson` export into any webpage with the included `website_widget.js`:
+
+```html
+<!-- 1. Add a container -->
+<div id="my-player"></div>
+
+<!-- 2. Load the widget script -->
+<script src="website_widget.js"></script>
+
+<!-- 3. Initialize -->
+<script>
+  AscilineWidget.init('#my-player', {
+    src:      'video.ascjson',
+    autoplay: true,
+    loop:     true,
+    color:    true,
+  });
+</script>
+```
+
 
 | Output | Details |
 | :--- | :--- |
