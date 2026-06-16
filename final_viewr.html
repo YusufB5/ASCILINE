@@ -607,33 +607,117 @@ function loadFile(file) {
   loading.classList.add('active');
   loadingText.textContent = `Loading ${file.name}...`;
 
-  const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      data = JSON.parse(e.target.result);
-      meta = data.meta;
-      if (!meta || !meta.cols || !meta.rows || !data.frames || !data.frames.length) {
-        throw new Error('Invalid .ascjson structure');
-      }
-      isPixel = meta.mode === 'pixel';
-      frameStride = isPixel ? 3 : 4;
-      currentFrame = 0;
-
-      loading.classList.remove('active');
-      initPlayer(file.name);
-      showToast(`Loaded ${data.frames.length} frames (${isPixel ? 'PIXEL' : 'ASCII'} mode)`, 'success');
-    } catch (err) {
-      loading.classList.remove('active');
-      dropzone.style.display = '';
-      showToast('Failed to parse file: ' + err.message, 'error');
-    }
-  };
-  reader.onerror = () => {
+  // ── Streaming chunk parser ────────────────────────────────────────────
+  // JSON.parse on a 200MB+ string crashes the browser mid-parse.
+  // Instead we read the file in 4MB chunks via ReadableStream and hand-parse
+  // the frame array token-by-token so we never hold more than one frame in
+  // memory at a time.
+  loadFileStreaming(file).then(() => {
+    loading.classList.remove('active');
+    initPlayer(file.name);
+    showToast(`Loaded ${data.frames.length} frames (${isPixel ? 'PIXEL' : 'ASCII'} mode)`, 'success');
+  }).catch(err => {
     loading.classList.remove('active');
     dropzone.style.display = '';
-    showToast('Failed to read file', 'error');
-  };
-  reader.readAsText(file);
+    showToast('Failed to parse file: ' + err.message, 'error');
+  });
+}
+
+async function loadFileStreaming(file) {
+  const frames  = [];
+  const total   = file.size;
+  const decoder = new TextDecoder();
+  const stream  = file.stream();
+  const reader  = stream.getReader();
+
+  let buffer    = '';   // rolling text buffer (never holds full file)
+  let totalRead = 0;
+  let metaDone  = false;
+  let inFrames  = false;
+  let frameCount = 0;
+
+  // ── read one chunk at a time, never accumulating the full file ────────
+  async function readChunk() {
+    const { done, value } = await reader.read();
+    if (done) return false;
+    totalRead += value.byteLength;
+    buffer += decoder.decode(value, { stream: true });
+    return true;
+  }
+
+  // ── Phase 1: read until we have the meta block ────────────────────────
+  loadingText.textContent = 'Reading header…';
+  while (!buffer.includes('"frames":[')) {
+    const ok = await readChunk();
+    if (!ok) break;
+  }
+
+  const metaMatch = buffer.match(/"meta"\s*:\s*(\{[^}]+\})/);
+  if (!metaMatch) throw new Error('Could not find meta block');
+  meta = JSON.parse(metaMatch[1]);
+  if (!meta || !meta.cols || !meta.rows) throw new Error('Invalid meta block');
+
+  // Trim buffer to just after opening '[' of frames array
+  const fi = buffer.indexOf('"frames":[');
+  if (fi === -1) throw new Error('Could not find frames array');
+  buffer = buffer.slice(fi + '"frames":['.length);
+  inFrames = true;
+
+  // ── Phase 2: extract frames one by one, streaming chunks as needed ────
+  // Each frame is a flat JSON array [n,n,...] — no nested arrays.
+  // We find the '[' and scan forward for the matching ']'.
+  // When we run out of buffer, we pull another chunk.
+
+  while (true) {
+    // Skip commas/whitespace between frames
+    buffer = buffer.trimStart().replace(/^,+/, '').trimStart();
+
+    // End of frames array
+    if (buffer.startsWith(']') || buffer.startsWith(']}')) break;
+
+    // Need more data to determine what's next
+    if (buffer.length < 2) {
+      const ok = await readChunk();
+      if (!ok) break;
+      continue;
+    }
+
+    if (buffer[0] !== '[') { buffer = buffer.slice(1); continue; }
+
+    // Find the closing ']' of this frame — load more chunks until we have it
+    let closeIdx = -1;
+    while (true) {
+      closeIdx = buffer.indexOf(']', 1);
+      if (closeIdx !== -1) break;
+      const ok = await readChunk();
+      if (!ok) break;
+    }
+    if (closeIdx === -1) break;
+
+    // Extract and parse this frame
+    const frameStr = buffer.slice(0, closeIdx + 1);
+    buffer = buffer.slice(closeIdx + 1);
+
+    // JSON.parse the frame array, then convert to Uint8Array
+    // (avoids the string-coercion bug that zeroed all values)
+    const arr = new Uint8Array(JSON.parse(frameStr));
+    frames.push(arr);
+    frameCount++;
+
+    // Yield to UI thread + update progress every 5 frames
+    if (frameCount % 5 === 0) {
+      const pct = Math.round(totalRead / total * 100);
+      loadingText.textContent = `Parsing frames… ${frameCount} frames (${pct}%)`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+
+  if (frames.length === 0) throw new Error('No frames found in file');
+
+  data = { meta, frames };
+  isPixel = meta.mode === 'pixel';
+  frameStride = isPixel ? 3 : 4;
+  currentFrame = 0;
 }
 
 // ── Player init ───────────────────────────────────────────
