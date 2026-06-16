@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASCILINE Studio</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:        #0c0c0e;
+  --surface:   #141418;
+  --raised:    #1c1c22;
+  --border:    #2a2a35;
+  --fg:        #e2e0ea;
+  --muted:     #5a5870;
+  --green:     #00e5a0;
+  --green-dim: #00e5a015;
+  --green-glow:#00e5a040;
+  --amber:     #ffb347;
+  --red:       #ff4d6a;
+  --mono:      'IBM Plex Mono', monospace;
+  --sans:      'IBM Plex Sans', sans-serif;
+  --r:         8px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 14px;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Scanline atmosphere ── */
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px, #00000008 2px, #00000008 4px);
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ══════════════════════════════════════
+   SCREEN SYSTEM
+══════════════════════════════════════ */
+.screen { display: none; flex-direction: column; min-height: 100vh; }
+.screen.active { display: flex; }
+
+/* ══════════════════════════════════════
+   SCREEN 1 — UPLOAD
+══════════════════════════════════════ */
+#screen-upload {
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  gap: 32px;
+}
+
+.brand {
+  text-align: center;
+}
+.brand-logo {
+  font-family: var(--mono);
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--green);
+  letter-spacing: 2px;
+}
+.brand-logo span { color: var(--muted); font-weight: 400; }
+.brand-sub {
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-top: 6px;
+}
+
+/* Drop zone */
+.dropzone {
+  width: 100%;
+  max-width: 520px;
+  border: 2px dashed var(--border);
+  border-radius: 16px;
+  padding: 56px 32px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  background: var(--surface);
+  position: relative;
+}
+.dropzone:hover, .dropzone.over {
+  border-color: var(--green);
+  background: var(--green-dim);
+}
+.dropzone input { display: none; }
+.dz-icon {
+  font-size: 40px;
+  margin-bottom: 16px;
+  display: block;
+  filter: grayscale(0.5);
+}
+.dz-title {
+  font-size: 17px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.dz-sub {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.dz-formats {
+  margin-top: 14px;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.fmt-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--raised);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+/* ── Quality picker ── */
+.quality-section {
+  width: 100%;
+  max-width: 520px;
+}
+.section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  font-family: var(--mono);
+}
+.quality-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.q-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 14px 10px;
+  text-align: center;
+  cursor: pointer;
+  background: var(--surface);
+  transition: all 0.18s;
+  user-select: none;
+}
+.q-card:hover { border-color: var(--green); background: var(--green-dim); }
+.q-card.selected {
+  border-color: var(--green);
+  background: var(--green-dim);
+  box-shadow: 0 0 0 1px var(--green);
+}
+.q-emoji { font-size: 22px; display: block; margin-bottom: 6px; }
+.q-name { font-weight: 600; font-size: 13px; }
+.q-detail { font-size: 11px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+
+/* Render button */
+.render-btn {
+  width: 100%;
+  max-width: 520px;
+  padding: 15px;
+  background: var(--green);
+  color: #000;
+  border: none;
+  border-radius: var(--r);
+  font-size: 15px;
+  font-weight: 700;
+  font-family: var(--sans);
+  cursor: pointer;
+  transition: all 0.18s;
+  letter-spacing: 0.3px;
+  opacity: 0.4;
+  pointer-events: none;
+}
+.render-btn.ready { opacity: 1; pointer-events: all; }
+.render-btn.ready:hover { background: #00ffb3; transform: translateY(-1px); }
+
+/* ══════════════════════════════════════
+   SCREEN 2 — RENDERING PROGRESS
+══════════════════════════════════════ */
+#screen-render {
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  gap: 28px;
+}
+
+.render-title {
+  font-family: var(--mono);
+  font-size: 20px;
+  color: var(--green);
+  text-align: center;
+}
+.render-file {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  font-family: var(--mono);
+  margin-top: -16px;
+}
+
+.progress-card {
+  width: 100%;
+  max-width: 560px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.prog-bar-wrap {
+  height: 6px;
+  background: var(--raised);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.prog-bar-fill {
+  height: 100%;
+  background: var(--green);
+  border-radius: 3px;
+  width: 0%;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 8px var(--green-glow);
+}
+
+.prog-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.prog-stat { text-align: center; }
+.prog-stat .val {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.prog-stat .lbl {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-top: 2px;
+}
+
+.prog-status {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  min-height: 18px;
+}
+
+/* Live preview strip */
+.preview-strip {
+  width: 100%;
+  max-width: 560px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+  display: none;
+  position: relative;
+}
+.preview-strip canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+}
+.preview-label {
+  position: absolute;
+  top: 8px; left: 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--green);
+  background: #000a;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+/* ══════════════════════════════════════
+   SCREEN 3 — PLAYER
+══════════════════════════════════════ */
+#screen-player {
+  flex-direction: column;
+}
+
+.player-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.player-logo {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--green);
+}
+.player-file {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+.spacer { flex: 1; }
+.topbar-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid var(--green);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.back-btn {
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.back-btn:hover { color: var(--fg); border-color: var(--muted); }
+
+/* Canvas viewport — fills available space */
+.player-viewport {
+  flex: 1;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+  min-height: 0;
+}
+.player-viewport canvas {
+  display: block;
+  image-rendering: pixelated;
+  max-width: 100%;
+  max-height: 100%;
+}
+.frame-badge {
+  position: absolute;
+  top: 10px; right: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--green);
+  background: #000b;
+  padding: 3px 9px;
+  border-radius: 5px;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.player-viewport:hover .frame-badge { opacity: 1; }
+
+/* Controls bar */
+.player-controls {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 10px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.seek-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--raised);
+  border-radius: 2px;
+  cursor: pointer;
+  position: relative;
+}
+.seek-fill {
+  height: 100%;
+  background: var(--green);
+  border-radius: 2px;
+  width: 0%;
+  pointer-events: none;
+}
+.seek-bar:hover { height: 6px; margin-top: -1px; }
+
+.ctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cbtn {
+  width: 34px; height: 34px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.cbtn:hover { border-color: var(--green); color: var(--green); }
+.cbtn.play-btn {
+  width: 40px; height: 40px;
+  background: var(--green);
+  color: #000;
+  border-color: var(--green);
+  font-size: 15px;
+}
+.cbtn.play-btn:hover { background: #00ffb3; }
+
+.time-display {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 90px;
+}
+
+.ctrl-select {
+  background: var(--raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  outline: none;
+}
+.ctrl-select:focus { border-color: var(--green); }
+
+.stats-row {
+  display: flex;
+  gap: 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.stats-row span { display: flex; align-items: center; gap: 4px; }
+.stats-row b { color: var(--fg); font-weight: 600; }
+
+/* ══════════════════════════════════════
+   TOAST
+══════════════════════════════════════ */
+.toast {
+  position: fixed;
+  bottom: 24px; left: 50%;
+  transform: translateX(-50%) translateY(80px);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 10px 20px;
+  border-radius: var(--r);
+  font-size: 13px;
+  font-family: var(--mono);
+  opacity: 0;
+  transition: all 0.3s;
+  z-index: 1000;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.ok { border-color: var(--green); color: var(--green); }
+.toast.err { border-color: var(--red); color: var(--red); }
+</style>
+</head>
+<body>
+
+<!-- ══ SCREEN 1: UPLOAD ══════════════════════════════════════════════ -->
+<div class="screen active" id="screen-upload">
+  <div class="brand">
+    <div class="brand-logo">ASCILINE<span>.studio</span></div>
+    <div class="brand-sub">Video → Pixel Art Renderer</div>
+  </div>
+
+  <div class="dropzone" id="dropzone">
+    <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.avi,.mkv,.webm">
+    <span class="dz-icon">🎬</span>
+    <div class="dz-title">Drop your video here</div>
+    <div class="dz-sub">or click to browse files</div>
+    <div class="dz-formats">
+      <span class="fmt-tag">MP4</span>
+      <span class="fmt-tag">MOV</span>
+      <span class="fmt-tag">AVI</span>
+      <span class="fmt-tag">MKV</span>
+      <span class="fmt-tag">WEBM</span>
+    </div>
+  </div>
+
+  <div class="quality-section">
+    <div class="section-label">Pick quality</div>
+    <div class="quality-grid">
+      <div class="q-card" data-cols="320" data-fps="8">
+        <span class="q-emoji">🚀</span>
+        <div class="q-name">Fast</div>
+        <div class="q-detail">320 cols · 8fps</div>
+      </div>
+      <div class="q-card selected" data-cols="480" data-fps="12">
+        <span class="q-emoji">⚡</span>
+        <div class="q-name">Balanced</div>
+        <div class="q-detail">480 cols · 12fps</div>
+      </div>
+      <div class="q-card" data-cols="640" data-fps="12">
+        <span class="q-emoji">🎯</span>
+        <div class="q-name">Sharp</div>
+        <div class="q-detail">640 cols · 12fps</div>
+      </div>
+      <div class="q-card" data-cols="960" data-fps="15">
+        <span class="q-emoji">💎</span>
+        <div class="q-name">Ultra</div>
+        <div class="q-detail">960 cols · 15fps</div>
+      </div>
+    </div>
+  </div>
+
+  <button class="render-btn" id="renderBtn">Choose a video to start →</button>
+</div>
+
+<!-- ══ SCREEN 2: RENDERING ═══════════════════════════════════════════ -->
+<div class="screen" id="screen-render">
+  <div class="render-title">Rendering…</div>
+  <div class="render-file" id="renderFileName">—</div>
+
+  <div class="progress-card">
+    <div class="prog-bar-wrap">
+      <div class="prog-bar-fill" id="progBar"></div>
+    </div>
+    <div class="prog-stats">
+      <div class="prog-stat">
+        <div class="val" id="progFrames">0</div>
+        <div class="lbl">Frames</div>
+      </div>
+      <div class="prog-stat">
+        <div class="val" id="progPct">0%</div>
+        <div class="lbl">Complete</div>
+      </div>
+      <div class="prog-stat">
+        <div class="val" id="progFps">—</div>
+        <div class="lbl">Speed</div>
+      </div>
+    </div>
+    <div class="prog-status" id="progStatus">Initialising…</div>
+  </div>
+
+  <div class="preview-strip" id="previewStrip">
+    <canvas id="previewCanvas"></canvas>
+    <div class="preview-label">LIVE PREVIEW</div>
+  </div>
+</div>
+
+<!-- ══ SCREEN 3: PLAYER ══════════════════════════════════════════════ -->
+<div class="screen" id="screen-player">
+  <div class="player-topbar">
+    <div class="player-logo">ASCILINE</div>
+    <div class="player-file" id="playerFileName">—</div>
+    <div class="spacer"></div>
+    <div class="topbar-badge" id="qualityBadge">—</div>
+    <button class="back-btn" id="backBtn">← New video</button>
+  </div>
+
+  <div class="player-viewport" id="playerViewport">
+    <canvas id="playerCanvas"></canvas>
+    <div class="frame-badge" id="frameBadge">0 / 0</div>
+  </div>
+
+  <div class="player-controls">
+    <div class="seek-bar" id="seekBar">
+      <div class="seek-fill" id="seekFill"></div>
+    </div>
+    <div class="ctrl-row">
+      <button class="cbtn" id="btnFirst" title="First frame">⏮</button>
+      <button class="cbtn" id="btnPrev"  title="Previous">⏪</button>
+      <button class="cbtn play-btn" id="btnPlay" title="Play / Pause">▶</button>
+      <button class="cbtn" id="btnNext"  title="Next">⏩</button>
+      <button class="cbtn" id="btnLast"  title="Last frame">⏭</button>
+      <div class="time-display" id="timeDisplay">0:00 / 0:00</div>
+      <div class="spacer"></div>
+      <label style="font-size:11px;color:var(--muted);font-family:var(--mono)">Speed</label>
+      <select class="ctrl-select" id="speedSel">
+        <option value="0.25">0.25×</option>
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2×</option>
+        <option value="3">3×</option>
+      </select>
+    </div>
+    <div class="stats-row" id="statsRow">
+      <span>Grid <b id="sGrid">—</b></span>
+      <span>FPS <b id="sFps">—</b></span>
+      <span>Frames <b id="sFrames">—</b></span>
+      <span>Duration <b id="sDur">—</b></span>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   ASCILINE STUDIO — Single-file Video → Pixel Art Player
+   Renders video frames directly in the browser using Canvas API.
+   No server, no Python, no external files needed.
+═══════════════════════════════════════════════════════════════════ */
+
+// ── Screen router ─────────────────────────────────────────────────
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+// ── Toast ─────────────────────────────────────────────────────────
+let _toastT = null;
+function toast(msg, type = '') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (type ? ' ' + type : '');
+  clearTimeout(_toastT);
+  _toastT = setTimeout(() => el.classList.remove('show'), 2800);
+}
+
+// ── Upload screen ─────────────────────────────────────────────────
+const dropzone  = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const renderBtn = document.getElementById('renderBtn');
+
+let selectedFile = null;
+let selectedCols = 480;
+let selectedFps  = 12;
+
+// Quality cards
+document.querySelectorAll('.q-card').forEach(card => {
+  card.addEventListener('click', () => {
+    document.querySelectorAll('.q-card').forEach(c => c.classList.remove('selected'));
+    card.classList.add('selected');
+    selectedCols = parseInt(card.dataset.cols);
+    selectedFps  = parseInt(card.dataset.fps);
+  });
+});
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('over'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('over'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('over');
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('video/')) setFile(f);
+  else toast('Please drop a video file', 'err');
+});
+fileInput.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) setFile(f);
+});
+
+function setFile(f) {
+  selectedFile = f;
+  dropzone.querySelector('.dz-title').textContent = f.name;
+  dropzone.querySelector('.dz-sub').textContent = formatBytes(f.size);
+  renderBtn.textContent = 'Render video →';
+  renderBtn.classList.add('ready');
+}
+
+renderBtn.addEventListener('click', () => {
+  if (!selectedFile) return;
+  startRender(selectedFile, selectedCols, selectedFps);
+});
+
+// ── Back button ───────────────────────────────────────────────────
+document.getElementById('backBtn').addEventListener('click', () => {
+  stopPlayer();
+  frames = [];
+  show('screen-upload');
+  fileInput.value = '';
+  selectedFile = null;
+  renderBtn.textContent = 'Choose a video to start →';
+  renderBtn.classList.remove('ready');
+  dropzone.querySelector('.dz-title').textContent = 'Drop your video here';
+  dropzone.querySelector('.dz-sub').textContent = 'or click to browse files';
+});
+
+/* ═══════════════════════════════════════════════════════════════════
+   RENDERER — Browser-native video → pixel frames
+   Uses <video> + <canvas> to decode frames, no Python needed.
+═══════════════════════════════════════════════════════════════════ */
+let frames   = [];   // Array of Uint8Array (RGB flat)
+let metaInfo = {};
+
+async function startRender(file, cols, fps) {
+  frames = [];
+  metaInfo = {};
+  show('screen-render');
+
+  document.getElementById('renderFileName').textContent = file.name;
+  document.getElementById('progBar').style.width = '0%';
+  document.getElementById('progFrames').textContent = '0';
+  document.getElementById('progPct').textContent = '0%';
+  document.getElementById('progFps').textContent = '—';
+  document.getElementById('progStatus').textContent = 'Loading video…';
+  document.getElementById('previewStrip').style.display = 'none';
+
+  // Create hidden video element
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.style.display = 'none';
+  document.body.appendChild(video);
+
+  const url = URL.createObjectURL(file);
+  video.src = url;
+
+  await new Promise((res, rej) => {
+    video.onloadedmetadata = res;
+    video.onerror = () => rej(new Error('Could not load video'));
+    setTimeout(() => rej(new Error('Video load timeout')), 15000);
+  });
+
+  const vidW   = video.videoWidth;
+  const vidH   = video.videoHeight;
+  const vidFps = await detectFps(video) || 30;
+  const duration = video.duration;
+
+  // Calculate rows maintaining aspect ratio
+  const rows = Math.max(1, Math.round(cols / (vidW / vidH)));
+
+  // Off-screen canvas for frame extraction
+  const offCanvas = new OffscreenCanvas(cols, rows);
+  const offCtx    = offCanvas.getContext('2d', { willReadFrequently: true });
+
+  // Preview canvas
+  const previewCanvas = document.getElementById('previewCanvas');
+  const previewCtx    = previewCanvas.getContext('2d');
+  previewCanvas.width  = cols;
+  previewCanvas.height = rows;
+  document.getElementById('previewStrip').style.display = 'block';
+
+  metaInfo = { cols, rows, fps, mode: 'pixel', vidW, vidH };
+
+  document.getElementById('progStatus').textContent = `${cols}×${rows} grid · ${fps} fps cap · ${Math.round(duration)}s video`;
+
+  const skipEvery = Math.max(1, Math.round(vidFps / fps));
+  const totalFrames = Math.floor(duration * vidFps / skipEvery);
+
+  let frameIdx  = 0;
+  let rendered  = 0;
+  let lastTime  = performance.now();
+  let frameTime = 0;
+
+  // ── Seek-based frame extraction ───────────────────────────────
+  // More reliable than play() for large files; works offline
+  const frameInterval = 1 / fps;
+  let t = 0;
+
+  while (t < duration - frameInterval * 0.5) {
+    // Seek video to timestamp
+    await seekVideo(video, t);
+
+    // Draw frame to off-screen canvas
+    offCtx.drawImage(video, 0, 0, cols, rows);
+    const imgData = offCtx.getImageData(0, 0, cols, rows);
+    const rgba    = imgData.data; // Uint8ClampedArray RGBA
+
+    // Convert RGBA → RGB Uint8Array
+    const rgb = new Uint8Array(cols * rows * 3);
+    for (let i = 0; i < cols * rows; i++) {
+      rgb[i * 3]     = rgba[i * 4];
+      rgb[i * 3 + 1] = rgba[i * 4 + 1];
+      rgb[i * 3 + 2] = rgba[i * 4 + 2];
+    }
+    frames.push(rgb);
+
+    // Live preview: copy to preview canvas
+    previewCtx.putImageData(imgData, 0, 0);
+
+    rendered++;
+    t += frameInterval;
+
+    // Update progress every 3 frames
+    if (rendered % 3 === 0 || t >= duration) {
+      const pct = Math.min(100, Math.round(t / duration * 100));
+      const now = performance.now();
+      const elapsed = (now - lastTime) / 1000;
+      const rps = elapsed > 0 ? Math.round(3 / elapsed) : 0;
+      lastTime = now;
+
+      document.getElementById('progBar').style.width    = pct + '%';
+      document.getElementById('progFrames').textContent = rendered;
+      document.getElementById('progPct').textContent    = pct + '%';
+      document.getElementById('progFps').textContent    = rps + ' f/s';
+      document.getElementById('progStatus').textContent = `Frame ${rendered} · ${fmtTime(t)} / ${fmtTime(duration)}`;
+
+      // Yield to keep UI responsive
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+
+  video.src = '';
+  URL.revokeObjectURL(url);
+  document.body.removeChild(video);
+
+  document.getElementById('progStatus').textContent = `Done — ${frames.length} frames`;
+  document.getElementById('progPct').textContent    = '100%';
+  document.getElementById('progBar').style.width    = '100%';
+
+  await new Promise(r => setTimeout(r, 600));
+  initPlayer();
+}
+
+function seekVideo(video, t) {
+  return new Promise(res => {
+    const onSeeked = () => { video.removeEventListener('seeked', onSeeked); res(); };
+    video.addEventListener('seeked', onSeeked);
+    video.currentTime = t;
+  });
+}
+
+async function detectFps(video) {
+  // Try to get FPS from video duration vs frame count heuristic
+  // Most browsers expose this via requestVideoFrameCallback if available
+  if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+    return new Promise(res => {
+      let t0, f0;
+      let count = 0;
+      const cb = (now, meta) => {
+        if (count === 0) { t0 = meta.mediaTime; f0 = now; }
+        count++;
+        if (count < 5) { video.requestVideoFrameCallback(cb); }
+        else { res(Math.round(count / (meta.mediaTime - t0))); }
+      };
+      video.currentTime = 0;
+      video.requestVideoFrameCallback(cb);
+      video.play().catch(() => {});
+      setTimeout(() => { video.pause(); res(30); }, 3000);
+    });
+  }
+  return 30; // safe fallback
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   PLAYER
+═══════════════════════════════════════════════════════════════════ */
+const playerCanvas   = document.getElementById('playerCanvas');
+const playerCtx      = playerCanvas.getContext('2d');
+const playerViewport = document.getElementById('playerViewport');
+
+let playing     = false;
+let currentFrame = 0;
+let animId      = null;
+let lastTick    = 0;
+
+function initPlayer() {
+  show('screen-player');
+
+  const { cols, rows, fps, vidW, vidH } = metaInfo;
+
+  // Set canvas native resolution
+  playerCanvas.width  = cols;
+  playerCanvas.height = rows;
+
+  // Fit canvas to viewport maintaining aspect ratio
+  fitCanvas();
+  window.addEventListener('resize', fitCanvas);
+
+  // Update UI labels
+  document.getElementById('playerFileName').textContent = selectedFile?.name || '';
+  document.getElementById('qualityBadge').textContent   = `${cols}×${rows}`;
+  document.getElementById('sGrid').textContent    = `${cols}×${rows}`;
+  document.getElementById('sFps').textContent     = fps;
+  document.getElementById('sFrames').textContent  = frames.length;
+  document.getElementById('sDur').textContent     = fmtTime(frames.length / fps);
+
+  currentFrame = 0;
+  renderFrame(0);
+  updateSeek();
+  startPlayer();
+}
+
+function fitCanvas() {
+  const { cols, rows } = metaInfo;
+  if (!cols || !rows) return;
+  const vw = playerViewport.clientWidth;
+  const vh = playerViewport.clientHeight;
+  const scale = Math.min(vw / cols, vh / rows);
+  playerCanvas.style.width  = Math.floor(cols * scale) + 'px';
+  playerCanvas.style.height = Math.floor(rows * scale) + 'px';
+}
+
+function renderFrame(idx) {
+  if (!frames.length || idx < 0 || idx >= frames.length) return;
+  const { cols, rows } = metaInfo;
+  const frame   = frames[idx];
+  const imgData = playerCtx.createImageData(cols, rows);
+  const px      = imgData.data;
+  const total   = cols * rows;
+
+  for (let i = 0; i < total; i++) {
+    const s = i * 3, d = i * 4;
+    px[d]     = frame[s];
+    px[d + 1] = frame[s + 1];
+    px[d + 2] = frame[s + 2];
+    px[d + 3] = 255;
+  }
+  playerCtx.putImageData(imgData, 0, 0);
+  document.getElementById('frameBadge').textContent = `${idx + 1} / ${frames.length}`;
+  updateTime(idx);
+}
+
+function updateSeek() {
+  const ratio = frames.length > 1 ? currentFrame / (frames.length - 1) : 0;
+  document.getElementById('seekFill').style.width = (ratio * 100) + '%';
+}
+
+function updateTime(idx) {
+  const fps = metaInfo.fps || 12;
+  const cur = idx / fps;
+  const tot = frames.length / fps;
+  document.getElementById('timeDisplay').textContent = `${fmtTime(cur)} / ${fmtTime(tot)}`;
+}
+
+function startPlayer() {
+  if (playing) return;
+  playing = true;
+  document.getElementById('btnPlay').textContent = '⏸';
+  lastTick = performance.now();
+  tick();
+}
+
+function stopPlayer() {
+  playing = false;
+  document.getElementById('btnPlay').textContent = '▶';
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+}
+
+function togglePlayer() { playing ? stopPlayer() : startPlayer(); }
+
+function tick() {
+  if (!playing) return;
+  const fps    = (metaInfo.fps || 12) * parseFloat(document.getElementById('speedSel').value || 1);
+  const now    = performance.now();
+  const needed = 1000 / fps;
+
+  if (now - lastTick >= needed) {
+    lastTick = now;
+    currentFrame++;
+    if (currentFrame >= frames.length) {
+      currentFrame = 0; // loop
+    }
+    renderFrame(currentFrame);
+    updateSeek();
+  }
+  animId = requestAnimationFrame(tick);
+}
+
+// Controls
+document.getElementById('btnPlay').addEventListener('click', togglePlayer);
+document.getElementById('btnFirst').addEventListener('click', () => { stopPlayer(); currentFrame = 0; renderFrame(0); updateSeek(); });
+document.getElementById('btnLast').addEventListener('click',  () => { stopPlayer(); currentFrame = frames.length - 1; renderFrame(currentFrame); updateSeek(); });
+document.getElementById('btnNext').addEventListener('click',  () => { stopPlayer(); currentFrame = Math.min(currentFrame + 1, frames.length - 1); renderFrame(currentFrame); updateSeek(); });
+document.getElementById('btnPrev').addEventListener('click',  () => { stopPlayer(); currentFrame = Math.max(currentFrame - 1, 0); renderFrame(currentFrame); updateSeek(); });
+
+// Seek bar
+const seekBar = document.getElementById('seekBar');
+let seeking = false;
+function seekFromEvent(e) {
+  const rect  = seekBar.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  currentFrame = Math.round(ratio * (frames.length - 1));
+  renderFrame(currentFrame);
+  updateSeek();
+}
+seekBar.addEventListener('mousedown', e => { seeking = true; stopPlayer(); seekFromEvent(e); });
+window.addEventListener('mousemove', e => { if (seeking) seekFromEvent(e); });
+window.addEventListener('mouseup', () => { seeking = false; });
+
+// Keyboard
+document.addEventListener('keydown', e => {
+  const active = document.querySelector('.screen.active')?.id;
+  if (active !== 'screen-player') return;
+  switch (e.code) {
+    case 'Space':      e.preventDefault(); togglePlayer(); break;
+    case 'ArrowRight': e.preventDefault(); document.getElementById('btnNext').click(); break;
+    case 'ArrowLeft':  e.preventDefault(); document.getElementById('btnPrev').click(); break;
+    case 'Home':       e.preventDefault(); document.getElementById('btnFirst').click(); break;
+    case 'End':        e.preventDefault(); document.getElementById('btnLast').click(); break;
+  }
+});
+
+// ── Utilities ─────────────────────────────────────────────────────
+function fmtTime(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+</script>
+</body>
+</html>
