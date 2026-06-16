@@ -1,0 +1,992 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASCILINE Player</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Space+Grotesk:wght@300;400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --bg-raised: #12121c;
+    --bg-surface: #1a1a2a;
+    --fg: #e8e6f0;
+    --fg-muted: #6e6b80;
+    --accent: #00e89d;
+    --accent-dim: #00e89d33;
+    --accent-hover: #00ffad;
+    --red: #ff4466;
+    --orange: #ff9944;
+    --border: #2a2a3e;
+    --radius: 10px;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-ui: 'Space Grotesk', sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-ui);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Background atmosphere ───────────────────────────── */
+  body::before {
+    content: '';
+    position: fixed;
+    top: -40%; left: -20%;
+    width: 80vw; height: 80vw;
+    background: radial-gradient(circle, #00e89d08 0%, transparent 60%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    bottom: -30%; right: -10%;
+    width: 60vw; height: 60vw;
+    background: radial-gradient(circle, #4400ff08 0%, transparent 60%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ── Layout ──────────────────────────────────────────── */
+  .app {
+    position: relative;
+    z-index: 1;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 28px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  header .logo {
+    font-family: var(--font-mono);
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: -0.5px;
+  }
+  header .logo span { color: var(--fg-muted); font-weight: 400; }
+  header .mode-badge {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    display: none;
+  }
+  header .mode-badge.visible { display: inline-block; }
+  header .spacer { flex: 1; }
+  header .file-info {
+    font-size: 13px;
+    color: var(--fg-muted);
+    font-family: var(--font-mono);
+  }
+
+  /* ── Drop zone ───────────────────────────────────────── */
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 60px 30px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    background: var(--bg-raised);
+    position: relative;
+    overflow: hidden;
+  }
+  .dropzone::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, #00e89d05, transparent 50%, #4400ff05);
+    pointer-events: none;
+  }
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--accent);
+    background: var(--bg-surface);
+  }
+  .dropzone .icon {
+    font-size: 42px;
+    color: var(--accent);
+    margin-bottom: 16px;
+    opacity: 0.8;
+  }
+  .dropzone h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .dropzone p {
+    color: var(--fg-muted);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .dropzone p code {
+    background: var(--bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .dropzone input[type="file"] { display: none; }
+
+  /* ── Canvas area ─────────────────────────────────────── */
+  .canvas-wrapper {
+    display: none;
+    background: #000;
+    border-radius: var(--radius);
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 4px 40px #00000080, 0 0 80px #00e89d0a;
+    border: 1px solid var(--border);
+  }
+  .canvas-wrapper.active { display: block; }
+  .canvas-wrapper canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    image-rendering: pixelated;
+  }
+
+  /* ── Frame counter overlay ───────────────────────────── */
+  .frame-overlay {
+    position: absolute;
+    top: 12px; right: 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: #000c;
+    padding: 4px 10px;
+    border-radius: 6px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .canvas-wrapper:hover .frame-overlay { opacity: 1; }
+
+  /* ── Controls ────────────────────────────────────────── */
+  .controls {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+  .controls.active { display: flex; }
+
+  .ctrl-btn {
+    width: 38px; height: 38px;
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    color: var(--fg);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+  }
+  .ctrl-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-dim);
+  }
+  .ctrl-btn.primary {
+    width: 44px; height: 44px;
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+    font-size: 16px;
+  }
+  .ctrl-btn.primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  /* ── Progress bar ────────────────────────────────────── */
+  .progress-wrap {
+    flex: 1;
+    height: 6px;
+    background: var(--bg);
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.05s linear;
+  }
+  .progress-wrap:hover .progress-fill { background: var(--accent-hover); }
+
+  /* ── Speed & volume ──────────────────────────────────── */
+  .ctrl-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-muted);
+  }
+  .ctrl-group select {
+    background: var(--bg-surface);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    cursor: pointer;
+    outline: none;
+  }
+  .ctrl-group select:focus { border-color: var(--accent); }
+
+  /* ── Stats bar ───────────────────────────────────────── */
+  .stats {
+    display: none;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-top: 20px;
+  }
+  .stats.active { display: grid; }
+  .stat-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .stat-card .label {
+    font-size: 11px;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 6px;
+  }
+  .stat-card .value {
+    font-family: var(--font-mono);
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--fg);
+  }
+  .stat-card .value.accent { color: var(--accent); }
+
+  /* ── Keyboard hints ──────────────────────────────────── */
+  .hints {
+    margin-top: 24px;
+    display: none;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .hints.active { display: flex; }
+  .hint {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .hint kbd {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-size: 11px;
+    color: var(--fg);
+  }
+
+  /* ── Loading spinner ─────────────────────────────────── */
+  .loading {
+    display: none;
+    text-align: center;
+    padding: 40px;
+  }
+  .loading.active { display: block; }
+  .spinner {
+    width: 36px; height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 14px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading p { color: var(--fg-muted); font-size: 14px; }
+
+  /* ── Toast ───────────────────────────────────────────── */
+  .toast {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 10px 22px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: var(--font-mono);
+    opacity: 0;
+    transition: all 0.4s ease;
+    z-index: 100;
+    pointer-events: none;
+  }
+  .toast.show {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+  }
+  .toast.error { border-color: var(--red); color: var(--red); }
+  .toast.success { border-color: var(--accent); color: var(--accent); }
+
+  /* ── Reduced motion ──────────────────────────────────── */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* ── Responsive ──────────────────────────────────────── */
+  @media (max-width: 640px) {
+    .app { padding: 14px 10px 40px; }
+    header { flex-wrap: wrap; gap: 8px; }
+    .dropzone { padding: 36px 16px; }
+    .dropzone .icon { font-size: 30px; }
+    .controls { flex-wrap: wrap; padding: 10px 12px; gap: 8px; }
+    .progress-wrap { order: -1; width: 100%; flex: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header>
+    <div class="logo">ASCILINE<span>.player</span></div>
+    <div class="mode-badge" id="modeBadge">pixel</div>
+    <div class="spacer"></div>
+    <div class="file-info" id="fileInfo"></div>
+  </header>
+
+  <!-- Drop zone -->
+  <div class="dropzone" id="dropzone">
+    <div class="icon"><i class="fas fa-film"></i></div>
+    <h2>Drop .ascjson file here</h2>
+    <p>
+      Export from video with
+      <code>python export_ascii.py video.mp4 --pixel</code>
+      <br>
+      then load the generated <code>.ascjson</code> file here.
+      <br>
+      Supports both <strong>PIXEL</strong> mode (16M color) and <strong>ASCII</strong> mode.
+    </p>
+    <input type="file" id="fileInput" accept=".ascjson,.json">
+  </div>
+
+  <!-- Loading -->
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <p id="loadingText">Loading frames...</p>
+  </div>
+
+  <!-- Canvas -->
+  <div class="canvas-wrapper" id="canvasWrapper">
+    <canvas id="playerCanvas"></canvas>
+    <div class="frame-overlay" id="frameOverlay">0 / 0</div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls" id="controls">
+    <button class="ctrl-btn" id="btnFirst" title="First frame" aria-label="First frame">
+      <i class="fas fa-backward-fast"></i>
+    </button>
+    <button class="ctrl-btn" id="btnPrev" title="Previous frame" aria-label="Previous frame">
+      <i class="fas fa-backward-step"></i>
+    </button>
+    <button class="ctrl-btn primary" id="btnPlay" title="Play / Pause" aria-label="Play or Pause">
+      <i class="fas fa-play" id="playIcon"></i>
+    </button>
+    <button class="ctrl-btn" id="btnNext" title="Next frame" aria-label="Next frame">
+      <i class="fas fa-forward-step"></i>
+    </button>
+    <button class="ctrl-btn" id="btnLast" title="Last frame" aria-label="Last frame">
+      <i class="fas fa-forward-fast"></i>
+    </button>
+
+    <div class="progress-wrap" id="progressBar" role="progressbar" aria-label="Frame progress">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+
+    <div class="ctrl-group">
+      <label for="speedSelect">Speed</label>
+      <select id="speedSelect">
+        <option value="0.25">0.25x</option>
+        <option value="0.5">0.5x</option>
+        <option value="0.75">0.75x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.5">1.5x</option>
+        <option value="2">2x</option>
+        <option value="3">3x</option>
+        <option value="5">5x</option>
+      </select>
+    </div>
+
+    <div class="ctrl-group">
+      <label for="sizeSelect">Size</label>
+      <select id="sizeSelect">
+        <option value="0">Auto</option>
+        <option value="1">1x</option>
+        <option value="2">2x</option>
+        <option value="3">3x</option>
+        <option value="4">4x</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats" id="stats">
+    <div class="stat-card">
+      <div class="label">Mode</div>
+      <div class="value accent" id="statMode">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Resolution</div>
+      <div class="value" id="statRes">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">FPS</div>
+      <div class="value" id="statFps">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Frames</div>
+      <div class="value" id="statFrames">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">File Size</div>
+      <div class="value" id="statSize">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Duration</div>
+      <div class="value" id="statDuration">—</div>
+    </div>
+  </div>
+
+  <!-- Keyboard hints -->
+  <div class="hints" id="hints">
+    <div class="hint"><kbd>Space</kbd> Play/Pause</div>
+    <div class="hint"><kbd>←</kbd><kbd>→</kbd> Step frames</div>
+    <div class="hint"><kbd>Home</kbd><kbd>End</kbd> First/Last</div>
+    <div class="hint"><kbd>+/-</kbd> Speed</div>
+    <div class="hint"><kbd>F</kbd> Fullscreen</div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+/* ================================================================
+   ASCILINE Web Player — PIXEL + ASCII mode renderer
+   ================================================================ */
+
+// ── DOM refs ──────────────────────────────────────────────
+const dropzone      = document.getElementById('dropzone');
+const fileInput     = document.getElementById('fileInput');
+const loading       = document.getElementById('loading');
+const loadingText   = document.getElementById('loadingText');
+const canvasWrapper = document.getElementById('canvasWrapper');
+const canvas        = document.getElementById('playerCanvas');
+const ctx           = canvas.getContext('2d');
+const frameOverlay  = document.getElementById('frameOverlay');
+const controls      = document.getElementById('controls');
+const statsEl       = document.getElementById('stats');
+const hints         = document.getElementById('hints');
+const modeBadge     = document.getElementById('modeBadge');
+const fileInfo      = document.getElementById('fileInfo');
+const toastEl       = document.getElementById('toast');
+
+const btnFirst = document.getElementById('btnFirst');
+const btnPrev  = document.getElementById('btnPrev');
+const btnPlay  = document.getElementById('btnPlay');
+const btnNext  = document.getElementById('btnNext');
+const btnLast  = document.getElementById('btnLast');
+const playIcon = document.getElementById('playIcon');
+
+const progressBar  = document.getElementById('progressBar');
+const progressFill = document.getElementById('progressFill');
+const speedSelect  = document.getElementById('speedSelect');
+const sizeSelect   = document.getElementById('sizeSelect');
+
+const statMode     = document.getElementById('statMode');
+const statRes      = document.getElementById('statRes');
+const statFps      = document.getElementById('statFps');
+const statFrames   = document.getElementById('statFrames');
+const statSize     = document.getElementById('statSize');
+const statDuration = document.getElementById('statDuration');
+
+// ── Player state ──────────────────────────────────────────
+let data       = null;   // parsed .ascjson
+let meta       = null;   // meta object
+let isPixel    = false;
+let frameStride = 4;     // 3 for pixel, 4 for ascii
+let currentFrame = 0;
+let playing      = false;
+let lastTick     = 0;
+let animId       = null;
+let fileSize     = 0;
+
+// ── Font for ASCII mode ───────────────────────────────────
+const ASCII_FONT_SIZE = 12;
+const CHAR_W = 7.2;   // approximate monospace char width at 12px
+const CHAR_H = 14;    // line height
+
+// ── Toast utility ─────────────────────────────────────────
+let toastTimer = null;
+function showToast(msg, type = '') {
+  toastEl.textContent = msg;
+  toastEl.className = 'toast' + (type ? ' ' + type : '');
+  requestAnimationFrame(() => { toastEl.classList.add('show'); });
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.classList.remove('show'); }, 2500);
+}
+
+// ── File loading ──────────────────────────────────────────
+dropzone.addEventListener('click', () => fileInput.click());
+
+dropzone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropzone.classList.add('dragover');
+});
+dropzone.addEventListener('dragleave', () => {
+  dropzone.classList.remove('dragover');
+});
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) loadFile(file);
+});
+fileInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (file) loadFile(file);
+});
+
+function loadFile(file) {
+  if (!file.name.endsWith('.ascjson') && !file.name.endsWith('.json')) {
+    showToast('Please load a .ascjson file', 'error');
+    return;
+  }
+  fileSize = file.size;
+  stopPlayback();
+  dropzone.style.display = 'none';
+  loading.classList.add('active');
+  loadingText.textContent = `Loading ${file.name}...`;
+
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      data = JSON.parse(e.target.result);
+      meta = data.meta;
+      if (!meta || !meta.cols || !meta.rows || !data.frames || !data.frames.length) {
+        throw new Error('Invalid .ascjson structure');
+      }
+      isPixel = meta.mode === 'pixel';
+      frameStride = isPixel ? 3 : 4;
+      currentFrame = 0;
+
+      loading.classList.remove('active');
+      initPlayer(file.name);
+      showToast(`Loaded ${data.frames.length} frames (${isPixel ? 'PIXEL' : 'ASCII'} mode)`, 'success');
+    } catch (err) {
+      loading.classList.remove('active');
+      dropzone.style.display = '';
+      showToast('Failed to parse file: ' + err.message, 'error');
+    }
+  };
+  reader.onerror = () => {
+    loading.classList.remove('active');
+    dropzone.style.display = '';
+    showToast('Failed to read file', 'error');
+  };
+  reader.readAsText(file);
+}
+
+// ── Player init ───────────────────────────────────────────
+function initPlayer(fileName) {
+  const cols = meta.cols;
+  const rows = meta.rows;
+  const fps  = meta.fps || 12;
+
+  // Setup canvas dimensions
+  if (isPixel) {
+    // PIXEL mode: each cell is a square block
+    canvas.width  = cols;
+    canvas.height = rows;
+  } else {
+    // ASCII mode: each cell is a character
+    canvas.width  = Math.ceil(cols * CHAR_W);
+    canvas.height = rows * CHAR_H;
+  }
+
+  // Show UI
+  canvasWrapper.classList.add('active');
+  controls.classList.add('active');
+  statsEl.classList.add('active');
+  hints.classList.add('active');
+
+  // Mode badge
+  modeBadge.textContent = isPixel ? 'PIXEL' : 'ASCII';
+  modeBadge.classList.add('visible');
+
+  // File info
+  fileInfo.textContent = fileName;
+
+  // Stats
+  statMode.textContent     = isPixel ? 'PIXEL (16M)' : 'ASCII';
+  statRes.textContent      = `${cols}×${rows}`;
+  statFps.textContent      = fps.toFixed(1);
+  statFrames.textContent   = data.frames.length;
+  statSize.textContent     = formatBytes(fileSize);
+  statDuration.textContent = formatDuration(data.frames.length / fps);
+
+  // Apply size
+  applySize();
+
+  // Render first frame
+  renderFrame(0);
+  updateProgress();
+}
+
+// ── Size management ───────────────────────────────────────
+function applySize() {
+  const val  = parseInt(sizeSelect.value);
+  const cols = meta.cols;
+  const rows = meta.rows;
+
+  if (isPixel) {
+    if (val === 0) {
+      // Auto: fit to container width
+      const maxW = canvasWrapper.parentElement.clientWidth;
+      const scale = Math.max(1, Math.floor(maxW / cols));
+      canvas.style.width  = (cols * scale) + 'px';
+      canvas.style.height = (rows * scale) + 'px';
+    } else {
+      canvas.style.width  = (cols * val) + 'px';
+      canvas.style.height = (rows * val) + 'px';
+    }
+  } else {
+    if (val === 0) {
+      canvas.style.width  = '100%';
+      canvas.style.height = 'auto';
+    } else {
+      const baseW = Math.ceil(cols * CHAR_W);
+      const baseH = rows * CHAR_H;
+      canvas.style.width  = (baseW * val) + 'px';
+      canvas.style.height = (baseH * val) + 'px';
+    }
+  }
+}
+
+sizeSelect.addEventListener('change', applySize);
+window.addEventListener('resize', () => { if (meta) applySize(); });
+
+// ── Frame rendering ───────────────────────────────────────
+function renderFrame(idx) {
+  if (!data || idx < 0 || idx >= data.frames.length) return;
+
+  const frame = data.frames[idx];
+  const cols  = meta.cols;
+  const rows  = meta.rows;
+
+  if (isPixel) {
+    renderPixelFrame(frame, cols, rows);
+  } else {
+    renderAsciiFrame(frame, cols, rows);
+  }
+
+  // Update overlay
+  frameOverlay.textContent = `${idx + 1} / ${data.frames.length}`;
+}
+
+function renderPixelFrame(frame, cols, rows) {
+  // Use ImageData for maximum performance
+  const imgData = ctx.createImageData(cols, rows);
+  const pixels  = imgData.data;
+  const len     = cols * rows;
+
+  for (let i = 0; i < len; i++) {
+    const base = i * 3;
+    const pi   = i * 4;
+    pixels[pi]     = frame[base];     // R
+    pixels[pi + 1] = frame[base + 1]; // G
+    pixels[pi + 2] = frame[base + 2]; // B
+    pixels[pi + 3] = 255;             // A
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function renderAsciiFrame(frame, cols, rows) {
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.font = `${ASCII_FONT_SIZE}px "JetBrains Mono", monospace`;
+  ctx.textBaseline = 'top';
+
+  let prevColor = '';
+
+  for (let r = 0; r < rows; r++) {
+    const y = r * CHAR_H;
+    // Build the line with color segments for fewer fillStyle changes
+    let segStart = 0;
+    let segColor = '';
+
+    for (let c = 0; c <= cols; c++) {
+      let charCode = 0, cr = 0, cg = 0, cb = 0;
+
+      if (c < cols) {
+        const base = (r * cols + c) * 4;
+        charCode = frame[base];
+        cr = frame[base + 1];
+        cg = frame[base + 2];
+        cb = frame[base + 3];
+      }
+
+      const color = (c < cols) ? `rgb(${cr},${cg},${cb})` : '';
+
+      if (color !== segColor || c === cols) {
+        // Flush previous segment
+        if (segStart < c && segColor) {
+          ctx.fillStyle = segColor;
+          // Draw characters in batch for this segment
+          for (let sc = segStart; sc < c; sc++) {
+            const sBase = (r * cols + sc) * 4;
+            const ch = String.fromCharCode(frame[sBase]);
+            ctx.fillText(ch, sc * CHAR_W, y);
+          }
+        }
+        segStart = c;
+        segColor = color;
+      }
+    }
+  }
+}
+
+// ── Playback ──────────────────────────────────────────────
+function startPlayback() {
+  if (!data || data.frames.length === 0) return;
+  if (currentFrame >= data.frames.length - 1) currentFrame = 0;
+  playing = true;
+  playIcon.className = 'fas fa-pause';
+  lastTick = performance.now();
+  tick();
+}
+
+function stopPlayback() {
+  playing = false;
+  playIcon.className = 'fas fa-play';
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+}
+
+function togglePlayback() {
+  if (playing) stopPlayback(); else startPlayback();
+}
+
+function tick() {
+  if (!playing) return;
+
+  const fps   = meta.fps || 12;
+  const speed = parseFloat(speedSelect.value) || 1;
+  const interval = 1000 / (fps * speed);
+  const now = performance.now();
+
+  if (now - lastTick >= interval) {
+    lastTick = now - ((now - lastTick) % interval);
+    currentFrame++;
+    if (currentFrame >= data.frames.length) {
+      currentFrame = data.frames.length - 1;
+      stopPlayback();
+    }
+    renderFrame(currentFrame);
+    updateProgress();
+  }
+
+  animId = requestAnimationFrame(tick);
+}
+
+function stepForward() {
+  if (!data) return;
+  stopPlayback();
+  currentFrame = Math.min(currentFrame + 1, data.frames.length - 1);
+  renderFrame(currentFrame);
+  updateProgress();
+}
+
+function stepBackward() {
+  if (!data) return;
+  stopPlayback();
+  currentFrame = Math.max(currentFrame - 1, 0);
+  renderFrame(currentFrame);
+  updateProgress();
+}
+
+function goToFirst() {
+  if (!data) return;
+  stopPlayback();
+  currentFrame = 0;
+  renderFrame(currentFrame);
+  updateProgress();
+}
+
+function goToLast() {
+  if (!data) return;
+  stopPlayback();
+  currentFrame = data.frames.length - 1;
+  renderFrame(currentFrame);
+  updateProgress();
+}
+
+function seekTo(ratio) {
+  if (!data) return;
+  const wasPlaying = playing;
+  if (playing) stopPlayback();
+  currentFrame = Math.round(ratio * (data.frames.length - 1));
+  currentFrame = Math.max(0, Math.min(currentFrame, data.frames.length - 1));
+  renderFrame(currentFrame);
+  updateProgress();
+  if (wasPlaying) startPlayback();
+}
+
+function updateProgress() {
+  if (!data || data.frames.length <= 1) {
+    progressFill.style.width = '0%';
+    return;
+  }
+  const ratio = currentFrame / (data.frames.length - 1);
+  progressFill.style.width = (ratio * 100) + '%';
+}
+
+// ── Button events ─────────────────────────────────────────
+btnPlay.addEventListener('click', togglePlayback);
+btnPrev.addEventListener('click', stepBackward);
+btnNext.addEventListener('click', stepForward);
+btnFirst.addEventListener('click', goToFirst);
+btnLast.addEventListener('click', goToLast);
+
+// ── Progress bar click/drag ───────────────────────────────
+let dragging = false;
+progressBar.addEventListener('mousedown', e => {
+  dragging = true;
+  seekFromEvent(e);
+});
+window.addEventListener('mousemove', e => {
+  if (dragging) seekFromEvent(e);
+});
+window.addEventListener('mouseup', () => { dragging = false; });
+
+function seekFromEvent(e) {
+  const rect = progressBar.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  seekTo(ratio);
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (!data) return;
+
+  switch (e.code) {
+    case 'Space':
+      e.preventDefault();
+      togglePlayback();
+      break;
+    case 'ArrowRight':
+      e.preventDefault();
+      stepForward();
+      break;
+    case 'ArrowLeft':
+      e.preventDefault();
+      stepBackward();
+      break;
+    case 'Home':
+      e.preventDefault();
+      goToFirst();
+      break;
+    case 'End':
+      e.preventDefault();
+      goToLast();
+      break;
+    case 'Equal':   // +
+    case 'NumpadAdd':
+      e.preventDefault();
+      changeSpeed(1);
+      break;
+    case 'Minus':   // -
+    case 'NumpadSubtract':
+      e.preventDefault();
+      changeSpeed(-1);
+      break;
+    case 'KeyF':
+      e.preventDefault();
+      toggleFullscreen();
+      break;
+  }
+});
+
+function changeSpeed(dir) {
+  const speeds = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5];
+  let idx = speeds.indexOf(parseFloat(speedSelect.value));
+  if (idx === -1) idx = 3;
+  idx = Math.max(0, Math.min(speeds.length - 1, idx + dir));
+  speedSelect.value = speeds[idx];
+  showToast(`Speed: ${speeds[idx]}x`);
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    canvasWrapper.requestFullscreen().catch(() => {});
+  } else {
+    document.exitFullscreen();
+  }
+}
+
+// ── Utility ───────────────────────────────────────────────
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function formatDuration(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 10);
+  return `${m}:${s.toString().padStart(2, '0')}.${ms}`;
+}
+</script>
+
+</body>
+</html>
