@@ -5,6 +5,7 @@ Modular, True Color (24-bit ANSI), zero-flicker ASCII video player.
 
   - VideoDecoder    : Produces (gray, color) frame pairs from video.
   - AsciiMapper     : Gray matrix -> ASCII character + ANSI True Color code -> String.
+  - HalfBlockMapper : BGR matrix -> ▀ cells, top pixel as foreground, bottom as background.
   - TerminalRenderer: Main loop, FPS control, orientation detection, rendering.
 
 Dependencies:
@@ -196,6 +197,67 @@ class AsciiMapper:
             lines.append("".join(buf))
 
         return self._RESET + "\n".join(lines) + self._RESET
+
+
+# ─────────────────────────────────────────────
+#  MODULE 2b ─ HalfBlockMapper
+# ─────────────────────────────────────────────
+class HalfBlockMapper:
+    """
+    Packs two pixels into every terminal cell using the upper-half block ▀:
+    the top pixel is the foreground colour, the bottom pixel the background.
+    Doubles vertical resolution compared to AsciiMapper at the same grid size.
+
+    Same convert() signature as AsciiMapper so TerminalRenderer can use either.
+    The gray matrix is ignored; there is no character to pick.
+    """
+
+    _GLYPH = "\u2580"
+    _RESET = "\033[0m"
+
+    def __init__(self, quantize_bits: int = 0) -> None:
+        self._qb = quantize_bits
+
+    def convert(self, gray, bgr: np.ndarray) -> str:
+        """
+        :param bgr: shape=(H,W,3) uint8 BGR matrix. Odd H gets a black row appended.
+        :return:    H/2 lines of coloured ▀ glyphs, each line ending in a reset.
+        """
+        if bgr.shape[0] % 2:
+            bgr = np.concatenate([bgr, np.zeros_like(bgr[:1])])
+
+        rgb = bgr[:, :, ::-1]
+        if self._qb > 0:
+            rgb = (rgb >> self._qb) << self._qb
+
+        top    = rgb[0::2]
+        bottom = rgb[1::2]
+        lines  = []
+
+        for row_idx in range(top.shape[0]):
+            fg_row = top[row_idx]
+            bg_row = bottom[row_idx]
+            prev_fg = prev_bg = None
+            buf = []
+
+            for col_idx in range(fg_row.shape[0]):
+                fg = (int(fg_row[col_idx, 0]), int(fg_row[col_idx, 1]), int(fg_row[col_idx, 2]))
+                bg = (int(bg_row[col_idx, 0]), int(bg_row[col_idx, 1]), int(bg_row[col_idx, 2]))
+
+                if fg != prev_fg:
+                    buf.append(f"\033[38;2;{fg[0]};{fg[1]};{fg[2]}m")
+                    prev_fg = fg
+                if bg != prev_bg:
+                    buf.append(f"\033[48;2;{bg[0]};{bg[1]};{bg[2]}m")
+                    prev_bg = bg
+
+                buf.append(self._GLYPH)
+
+            lines.append("".join(buf))
+
+        # Reset at every line end so centring padding on the next line is not
+        # painted with the last background colour.
+        return self._RESET + (self._RESET + "\n").join(lines) + self._RESET
 
 
 # ─────────────────────────────────────────────
