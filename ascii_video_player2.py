@@ -424,6 +424,8 @@ if __name__ == "__main__":
         help="Color quality: 0=max quality, 3=max speed (default: 0)")
     parser.add_argument("-c", "--cols", type=int, default=0,
         help="Fixed grid width. If 0, auto-fits to terminal (default: 0)")
+    parser.add_argument("--half-block", action="store_true", default=False,
+        help="Render two pixels per cell with \u2580 (doubles vertical resolution)")
     parser.add_argument("--webcam", action="store_true", default=False,
         help="Use webcam instead of a video file")
     parser.add_argument("--webcam-device", type=int, default=0,
@@ -436,6 +438,8 @@ if __name__ == "__main__":
 
     if not args.webcam and args.video is None:
         parser.error("a video file is required (or use --webcam)")
+    if args.half_block and args.palette:
+        parser.error("--palette has no effect with --half-block")
 
     custom_palette = args.palette.split() if args.palette else None
 
@@ -451,6 +455,7 @@ if __name__ == "__main__":
             cols          = args.cols,
             fallback_fps  = args.webcam_fps if args.webcam else 0,
             mirror        = mirror,
+            half_block    = args.half_block,
         )
         renderer.play()
     except FileNotFoundError as e:

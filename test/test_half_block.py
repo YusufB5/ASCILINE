@@ -12,6 +12,7 @@ import io
 import os
 import sys
 import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -122,6 +123,25 @@ class TerminalRendererHalfBlockTest(unittest.TestCase):
         text = out.getvalue()
         self.assertEqual(text.count("\u2580"), 3 * cols * pixel_rows // 2)
         self.assertIn("\033[48;2;", text)
+
+
+class HalfBlockCliTest(unittest.TestCase):
+    PLAYER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "ascii_video_player2.py")
+
+    def _run(self, *args):
+        return subprocess.run([sys.executable, self.PLAYER, *args],
+                              capture_output=True, text=True, encoding="utf-8")
+
+    def test_help_lists_half_block(self):
+        result = self._run("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--half-block", result.stdout)
+
+    def test_half_block_rejects_palette(self):
+        result = self._run("clip.mp4", "--half-block", "--palette", "#")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--palette has no effect with --half-block", result.stderr)
 
 
 if __name__ == "__main__":
