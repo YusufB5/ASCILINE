@@ -8,14 +8,20 @@ built by hand, so no video file or terminal is needed.
     python -m unittest discover -s test
     pytest test/
 """
+import io
 import os
 import sys
+import shutil
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
 import numpy as np
+import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ascii_video_player2 import HalfBlockMapper
+from ascii_video_player2 import HalfBlockMapper, TerminalRenderer
 
 RESET = "\033[0m"
 
@@ -68,6 +74,54 @@ class HalfBlockMapperTest(unittest.TestCase):
         out = HalfBlockMapper(quantize_bits=2).convert(None, frame)
         self.assertIn(fg(252, 252, 252), out)
         self.assertIn(bg(252, 252, 252), out)
+
+
+def _make_video(path, frames=3, w=64, h=36, fps=10.0):
+    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), fps, (w, h))
+    if not vw.isOpened():
+        return False
+    for i in range(frames):
+        img = np.zeros((h, w, 3), np.uint8)
+        img[:, : w // 2] = (40, 80, 120)
+        img[:, w // 2 :] = (120 + i * 20, 80, 40)
+        vw.write(img)
+    vw.release()
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
+class TerminalRendererHalfBlockTest(unittest.TestCase):
+    TERM = os.terminal_size((120, 42))
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.video = os.path.join(self.tmp, "clip.avi")
+        if not _make_video(self.video):
+            self.skipTest("cv2.VideoWriter unavailable")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _renderer(self, **kwargs):
+        with patch("ascii_video_player2.time.sleep"), \
+             patch("ascii_video_player2.shutil.get_terminal_size", return_value=self.TERM), \
+             redirect_stdout(io.StringIO()):
+            return TerminalRenderer(self.video, **kwargs)
+
+    def test_half_block_doubles_pixel_rows_for_the_same_cell_grid(self):
+        plain = self._renderer(cols=100)
+        half = self._renderer(cols=100, half_block=True)
+        cols, rows = plain._decoder._size
+        self.assertEqual(half._decoder._size, (cols, rows * 2))
+
+    def test_play_writes_half_block_frames(self):
+        renderer = self._renderer(cols=100, half_block=True)
+        cols, pixel_rows = renderer._decoder._size
+        out = io.StringIO()
+        with patch("ascii_video_player2.time.sleep"), redirect_stdout(out):
+            renderer.play()
+        text = out.getvalue()
+        self.assertEqual(text.count("\u2580"), 3 * cols * pixel_rows // 2)
+        self.assertIn("\033[48;2;", text)
 
 
 if __name__ == "__main__":

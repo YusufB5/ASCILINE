@@ -293,6 +293,7 @@ class TerminalRenderer:
         cols         : int = 0,
         fallback_fps : float = 0,
         mirror       : bool = False,
+        half_block   : bool = False,
     ) -> None:
         """
         :param path:          Path to video file or webcam index
@@ -301,10 +302,12 @@ class TerminalRenderer:
         :param cols:          Fixed columns. If 0, auto-fit to terminal.
         :param fallback_fps:  Fallback FPS if source FPS is unknown.
         :param mirror:        If True, flip each frame horizontally (for webcams).
+        :param half_block:    If True, render two pixels per cell with ▀ (palette is ignored).
         """
         # ── Video metadata ────────────────────────────────────────────
         # Initialize decoder once with dummy dimensions to get source resolution
-        self._decoder = VideoDecoder(path, 2, 2, mirror=mirror, fallback_fps=fallback_fps)
+        self._decoder = VideoDecoder(path, 2, 2, skip_gray=half_block,
+                                     mirror=mirror, fallback_fps=fallback_fps)
         vid_w, vid_h = self._decoder.vid_w, self._decoder.vid_h
         src_fps      = self._decoder.fps
 
@@ -337,25 +340,35 @@ class TerminalRenderer:
                     cols = safe_cols
                     rows = max(1, int(cols * aspect * self.CHAR_RATIO))
 
+        # cols/rows above are terminal cells. Half-block mode fits the same
+        # cell grid but samples two pixel rows per cell.
+        pixel_rows = rows * 2 if half_block else rows
+
         # ── Calculate Center Padding ──────────────────────────────────────────────
         self._pad_y = max(0, (t_lines - rows) // 2)
         self._pad_x = " " * max(0, (t_cols - cols) // 2)
 
         # ── Info screen ──────────────────────────────────────────────────
+        if half_block:
+            grid_info = f"{cols}x{rows} cells, {cols}x{pixel_rows} pixels (half-block)"
+        else:
+            grid_info = f"{cols}x{rows} characters"
+
         print(self._CLEAR_SCREEN)
         print(
             f"\033[1m[ASCII Player — True Color]\033[0m\n"
             f"  Orientation : {orientation.upper()}\n"
             f"  Video       : {vid_w}x{vid_h}\n"
-            f"  ASCII       : {cols}x{rows} characters\n"
+            f"  ASCII       : {grid_info}\n"
             f"  FPS         : {src_fps:.1f}\n"
             f"  Quantization: {2**(8-quantize_bits)} levels/channel\n"
             f"  Exit        : Ctrl+C\n"
         )
         time.sleep(2.0)
 
-        self._decoder._size = (cols, rows)  # update target size after calculation
-        self._mapper        = AsciiMapper(palette, quantize_bits)
+        self._decoder._size = (cols, pixel_rows)  # update target size after calculation
+        self._mapper        = HalfBlockMapper(quantize_bits) if half_block \
+                              else AsciiMapper(palette, quantize_bits)
         self._fps           = src_fps
         self._frame_t       = 1.0 / self._fps
 
