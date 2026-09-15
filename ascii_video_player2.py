@@ -5,6 +5,7 @@ Modular, True Color (24-bit ANSI), zero-flicker ASCII video player.
 
   - VideoDecoder    : Produces (gray, color) frame pairs from video.
   - AsciiMapper     : Gray matrix -> ASCII character + ANSI True Color code -> String.
+  - HalfBlockMapper : BGR matrix -> ▀ cells, top pixel as foreground, bottom as background.
   - TerminalRenderer: Main loop, FPS control, orientation detection, rendering.
 
 Dependencies:
@@ -199,6 +200,67 @@ class AsciiMapper:
 
 
 # ─────────────────────────────────────────────
+#  MODULE 2b ─ HalfBlockMapper
+# ─────────────────────────────────────────────
+class HalfBlockMapper:
+    """
+    Packs two pixels into every terminal cell using the upper-half block ▀:
+    the top pixel is the foreground colour, the bottom pixel the background.
+    Doubles vertical resolution compared to AsciiMapper at the same grid size.
+
+    Same convert() signature as AsciiMapper so TerminalRenderer can use either.
+    The gray matrix is ignored; there is no character to pick.
+    """
+
+    _GLYPH = "\u2580"
+    _RESET = "\033[0m"
+
+    def __init__(self, quantize_bits: int = 0) -> None:
+        self._qb = quantize_bits
+
+    def convert(self, gray, bgr: np.ndarray) -> str:
+        """
+        :param bgr: shape=(H,W,3) uint8 BGR matrix. Odd H gets a black row appended.
+        :return:    H/2 lines of coloured ▀ glyphs, each line ending in a reset.
+        """
+        if bgr.shape[0] % 2:
+            bgr = np.concatenate([bgr, np.zeros_like(bgr[:1])])
+
+        rgb = bgr[:, :, ::-1]
+        if self._qb > 0:
+            rgb = (rgb >> self._qb) << self._qb
+
+        top    = rgb[0::2]
+        bottom = rgb[1::2]
+        lines  = []
+
+        for row_idx in range(top.shape[0]):
+            fg_row = top[row_idx]
+            bg_row = bottom[row_idx]
+            prev_fg = prev_bg = None
+            buf = []
+
+            for col_idx in range(fg_row.shape[0]):
+                fg = (int(fg_row[col_idx, 0]), int(fg_row[col_idx, 1]), int(fg_row[col_idx, 2]))
+                bg = (int(bg_row[col_idx, 0]), int(bg_row[col_idx, 1]), int(bg_row[col_idx, 2]))
+
+                if fg != prev_fg:
+                    buf.append(f"\033[38;2;{fg[0]};{fg[1]};{fg[2]}m")
+                    prev_fg = fg
+                if bg != prev_bg:
+                    buf.append(f"\033[48;2;{bg[0]};{bg[1]};{bg[2]}m")
+                    prev_bg = bg
+
+                buf.append(self._GLYPH)
+
+            lines.append("".join(buf))
+
+        # Reset at every line end so centring padding on the next line is not
+        # painted with the last background colour.
+        return self._RESET + (self._RESET + "\n").join(lines) + self._RESET
+
+
+# ─────────────────────────────────────────────
 #  MODULE 3 ─ TerminalRenderer
 # ─────────────────────────────────────────────
 class TerminalRenderer:
@@ -231,6 +293,7 @@ class TerminalRenderer:
         cols         : int = 0,
         fallback_fps : float = 0,
         mirror       : bool = False,
+        half_block   : bool = False,
     ) -> None:
         """
         :param path:          Path to video file or webcam index
@@ -239,10 +302,12 @@ class TerminalRenderer:
         :param cols:          Fixed columns. If 0, auto-fit to terminal.
         :param fallback_fps:  Fallback FPS if source FPS is unknown.
         :param mirror:        If True, flip each frame horizontally (for webcams).
+        :param half_block:    If True, render two pixels per cell with ▀ (palette is ignored).
         """
         # ── Video metadata ────────────────────────────────────────────
         # Initialize decoder once with dummy dimensions to get source resolution
-        self._decoder = VideoDecoder(path, 2, 2, mirror=mirror, fallback_fps=fallback_fps)
+        self._decoder = VideoDecoder(path, 2, 2, skip_gray=half_block,
+                                     mirror=mirror, fallback_fps=fallback_fps)
         vid_w, vid_h = self._decoder.vid_w, self._decoder.vid_h
         src_fps      = self._decoder.fps
 
@@ -275,25 +340,35 @@ class TerminalRenderer:
                     cols = safe_cols
                     rows = max(1, int(cols * aspect * self.CHAR_RATIO))
 
+        # cols/rows above are terminal cells. Half-block mode fits the same
+        # cell grid but samples two pixel rows per cell.
+        pixel_rows = rows * 2 if half_block else rows
+
         # ── Calculate Center Padding ──────────────────────────────────────────────
         self._pad_y = max(0, (t_lines - rows) // 2)
         self._pad_x = " " * max(0, (t_cols - cols) // 2)
 
         # ── Info screen ──────────────────────────────────────────────────
+        if half_block:
+            grid_info = f"{cols}x{rows} cells, {cols}x{pixel_rows} pixels (half-block)"
+        else:
+            grid_info = f"{cols}x{rows} characters"
+
         print(self._CLEAR_SCREEN)
         print(
             f"\033[1m[ASCII Player — True Color]\033[0m\n"
             f"  Orientation : {orientation.upper()}\n"
             f"  Video       : {vid_w}x{vid_h}\n"
-            f"  ASCII       : {cols}x{rows} characters\n"
+            f"  ASCII       : {grid_info}\n"
             f"  FPS         : {src_fps:.1f}\n"
             f"  Quantization: {2**(8-quantize_bits)} levels/channel\n"
             f"  Exit        : Ctrl+C\n"
         )
         time.sleep(2.0)
 
-        self._decoder._size = (cols, rows)  # update target size after calculation
-        self._mapper        = AsciiMapper(palette, quantize_bits)
+        self._decoder._size = (cols, pixel_rows)  # update target size after calculation
+        self._mapper        = HalfBlockMapper(quantize_bits) if half_block \
+                              else AsciiMapper(palette, quantize_bits)
         self._fps           = src_fps
         self._frame_t       = 1.0 / self._fps
 
@@ -349,6 +424,8 @@ if __name__ == "__main__":
         help="Color quality: 0=max quality, 3=max speed (default: 0)")
     parser.add_argument("-c", "--cols", type=int, default=0,
         help="Fixed grid width. If 0, auto-fits to terminal (default: 0)")
+    parser.add_argument("--half-block", action="store_true", default=False,
+        help="Render two pixels per cell with \u2580 (doubles vertical resolution)")
     parser.add_argument("--webcam", action="store_true", default=False,
         help="Use webcam instead of a video file")
     parser.add_argument("--webcam-device", type=int, default=0,
@@ -361,6 +438,8 @@ if __name__ == "__main__":
 
     if not args.webcam and args.video is None:
         parser.error("a video file is required (or use --webcam)")
+    if args.half_block and args.palette:
+        parser.error("--palette has no effect with --half-block")
 
     custom_palette = args.palette.split() if args.palette else None
 
@@ -376,6 +455,7 @@ if __name__ == "__main__":
             cols          = args.cols,
             fallback_fps  = args.webcam_fps if args.webcam else 0,
             mirror        = mirror,
+            half_block    = args.half_block,
         )
         renderer.play()
     except FileNotFoundError as e:

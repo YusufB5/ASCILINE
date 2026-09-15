@@ -305,7 +305,13 @@ python ascii_video_player2.py video.mp4 --cols 100 --quality 0
 
 # Webcam directly in the terminal
 python ascii_video_player2.py --webcam --cols 100
+
+# Half-block mode: two pixels per cell (▀ with foreground/background colour),
+# double the vertical resolution of the character modes
+python ascii_video_player2.py video.mp4 --half-block
 ```
+
+Leave out `--cols` and the player fills the terminal it starts in, so maximise the window and shrink the font first. `--palette` has no effect in half-block mode.
 
 > Don't resize the terminal window during playback — dynamic text wrapping will corrupt the layout.
 
