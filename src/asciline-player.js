@@ -200,6 +200,37 @@ const CHAR_LUT = new Array(128);
 for (let i = 0; i < 128; i++) CHAR_LUT[i] = String.fromCharCode(i);
 
 /**
+ * _ByteStreamParser — lightweight ring buffer for binary ASCF parsing.
+ * Used internally by _connectAscf() to incrementally read header + frame packets.
+ */
+class _ByteStreamParser {
+    constructor() { this.buffer = new Uint8Array(0); }
+    push(chunk) {
+        const n = new Uint8Array(this.buffer.length + chunk.length);
+        n.set(this.buffer, 0);
+        n.set(chunk, this.buffer.length);
+        this.buffer = n;
+    }
+    read(bytes) {
+        if (this.buffer.length < bytes) return null;
+        const data = this.buffer.subarray(0, bytes).slice(); // owned copy
+        this.buffer = this.buffer.subarray(bytes);
+        return data;
+    }
+    unshift(chunk) {
+        const n = new Uint8Array(chunk.length + this.buffer.length);
+        n.set(chunk, 0);
+        n.set(this.buffer, chunk.length);
+        this.buffer = n;
+    }
+    peek32BE() {
+        if (this.buffer.length < 4) return null;
+        return (this.buffer[0] << 24 | this.buffer[1] << 16 | this.buffer[2] << 8 | this.buffer[3]) >>> 0;
+    }
+    get length() { return this.buffer.length; }
+}
+
+/**
  * AsciiPlayer Class
  */
 export class AsciiPlayer {
@@ -215,6 +246,9 @@ export class AsciiPlayer {
         // Options & Defaults
         this.options = Object.assign({
             url: null,                  // WebSocket URL or auto-derived
+            src: null,                  // Static .ascf file URL (no backend required)
+            audioSrc: null,             // Static audio file URL paired with src
+            loop: false,                // Loop ASCF static playback when finished
             audio: true,                // Audio element / selector / boolean
             selectionLayer: null,       // Text element for copyable selection
             container: null,            // Sizing container (defaults to canvas parent)
@@ -422,7 +456,7 @@ export class AsciiPlayer {
 
     // ── PUBLIC PLAYBACK CONTROL ──
 
-    play() {
+    play(srcUrl, audioUrl) {
         if (this.state === 'PAUSED') {
             this.resume();
             return;
@@ -431,6 +465,17 @@ export class AsciiPlayer {
         this._hidePlayOverlay();
         this._setState('CONNECTING');
 
+        // Resolve source: explicit arg → options.src → options.url (WS)
+        const resolvedSrc   = srcUrl   || this.options.src   || this.options.url;
+        const resolvedAudio = audioUrl || this.options.audioSrc || null;
+
+        // Route to static ASCF player when a .ascf URL / path is given
+        if (this._isStaticSrc(resolvedSrc)) {
+            this._connectAscf(resolvedSrc, resolvedAudio);
+            return;
+        }
+
+        // ── Live WebSocket mode (original behaviour, unchanged) ──
         // Unlock audio context while we're inside a user-gesture call stack.
         // Browsers require audio.play() to be called synchronously from a user
         // gesture (click, tap, keydown). By the time the first INIT frame arrives
@@ -485,7 +530,15 @@ export class AsciiPlayer {
             this.audioEl.play().catch(() => {});
         }
 
-        this.frameBuffer.length = 0;
+        // WS mode: clear stale frames — the server will push fresh ones from
+        // the current position after receiving the 'pause: false' message.
+        // ASCF static mode: keep the buffered frames. The file stream is already
+        // ahead of the audio clock; discarding the buffer creates a gap where
+        // the render loop has nothing to draw (video freezes while audio plays).
+        if (!this._ascfSrc) {
+            this.frameBuffer.length = 0;
+        }
+
         this.lastRenderTime = performance.now();
         this.lastFpsUpdate = performance.now();
         this.frameCount = 0;
@@ -496,6 +549,14 @@ export class AsciiPlayer {
         if (this.state === 'PLAYING') this.pause();
         else if (this.state === 'PAUSED') this.resume();
         else if (this.state === 'IDLE' || this.state === 'ENDED' || this.state === 'ERROR') this.play();
+    }
+
+    // Returns true when the URL points to a static .ascf file (not a WebSocket).
+    _isStaticSrc(url) {
+        if (!url) return false;
+        const lower = url.toLowerCase();
+        if (lower.startsWith('ws://') || lower.startsWith('wss://')) return false;
+        return lower.endsWith('.ascf') || lower.includes('.ascf?') || lower.includes('.ascf#');
     }
 
     seek(targetSec) {
@@ -673,6 +734,7 @@ export class AsciiPlayer {
             'cursor:pointer', 'z-index:10',
             'background:rgba(0,0,0,0.45)',
             'transition:opacity 0.15s ease',
+            'user-select:none', '-webkit-user-select:none',
         ].join(';');
 
         const btn = document.createElement('div');
@@ -737,6 +799,7 @@ export class AsciiPlayer {
             'backdrop-filter:blur(3px)',
             '-webkit-backdrop-filter:blur(3px)',
             'transition:opacity 0.15s ease',
+            'user-select:none', '-webkit-user-select:none',
         ].join(';');
 
         const btn = document.createElement('div');
@@ -898,6 +961,12 @@ export class AsciiPlayer {
             this._keydownHandler = null;
         }
         window.removeEventListener('resize', this._resizeBound);
+        // Abort any in-flight ASCF HTTP stream
+        if (this._ascfAbortController) {
+            this._ascfAbortController.abort();
+            this._ascfAbortController = null;
+            this._ascfIsStreaming = false;
+        }
         if (this.ws) {
             this.ws.onclose = null;
             this.ws.close();
@@ -1065,6 +1134,190 @@ export class AsciiPlayer {
             this._finishStream('ERROR');
         };
     }
+
+    // ── STATIC ASCF FILE PLAYBACK ──
+
+    /**
+     * Fetches and plays a pre-compiled .ascf file without any backend server.
+     * Streams the file via HTTP (or from a local URL), parses the binary header
+     * and frame packets, then feeds them into the same render pipeline used for
+     * live WebSocket streams — including audio sync, codec decoding, and loop.
+     *
+     * @param {string} ascfUrl  - URL of the .ascf file
+     * @param {string|null} audioUrl - Optional URL of a paired .mp3 audio file
+     */
+    async _connectAscf(ascfUrl, audioUrl) {
+        this.frameBuffer.length = 0;
+        this.framesInFlight = 0;
+        this.frameCount = 0;
+        this.currentFps = 0;
+        this.streamEpoch++;
+        this._ascfIsStreaming = true;
+        this._ascfSrc   = ascfUrl;
+        this._ascfAudio = audioUrl;
+        this._ascfAbortController = new AbortController();
+
+        const textDec = new TextDecoder();
+
+        try {
+            const response = await fetch(ascfUrl, { signal: this._ascfAbortController.signal });
+            if (!response.ok) {
+                this.emit('error', `ASCF fetch failed: HTTP ${response.status}`);
+                this._finishStream('ERROR');
+                return;
+            }
+
+            // Prepare audio element with the static file (same as WS path)
+            if (audioUrl && this.audioEl) {
+                this.audioEl.pause();
+                this.audioEl.src = audioUrl;
+                this.audioEl.currentTime = 0;
+                this.audioEl.load();
+            }
+
+            const reader   = response.body.getReader();
+            const parser   = new _ByteStreamParser();
+            const myEpoch  = this.streamEpoch;
+            let headerParsed = false;
+
+            while (this._ascfIsStreaming) {
+                // Back-pressure: pause reading if buffer is full
+                if ((this.frameBuffer.length + this.framesInFlight) >= 90) {
+                    await new Promise(r => setTimeout(r, 50));
+                    if (!this._ascfIsStreaming || myEpoch !== this.streamEpoch) return;
+                    continue;
+                }
+
+                const { done, value } = await reader.read();
+                if (value) parser.push(value);
+                if (myEpoch !== this.streamEpoch) return; // superseded
+
+                // ── Parse header once we have 18 bytes ──
+                if (!headerParsed && parser.length >= 18) {
+                    const headerBytes = parser.read(18);
+                    const magic = textDec.decode(headerBytes.subarray(0, 4));
+                    if (magic !== 'ASCF' && magic !== 'ASC2') {
+                        this.emit('error', 'Invalid ASCF file: bad magic');
+                        this._finishStream('ERROR');
+                        return;
+                    }
+
+                    const hv = new DataView(headerBytes.buffer, headerBytes.byteOffset, headerBytes.byteLength);
+                    this.targetFps   = hv.getFloat32(4, false);
+                    this.frameInterval = 1000 / this.targetFps;
+                    this.renderMode  = hv.getUint8(8);
+                    this.pixelMode   = hv.getUint8(9) === 1;
+                    const cols       = hv.getUint16(10, false);
+                    const rows       = hv.getUint16(12, false);
+
+                    if (magic === 'ASC2') {
+                        const totalFrames = hv.getUint32(14, false);
+                        this.duration = totalFrames > 0 ? totalFrames / this.targetFps : 0;
+                    } else {
+                        // Legacy ASCF (14-byte header): push extra 4 bytes back as frame data
+                        this.duration = 0;
+                        parser.unshift(headerBytes.subarray(14, 18));
+                    }
+
+                    this._buildCanvas(cols, rows);
+
+                    // Codec decoder: 4 bytes/cell (char+RGB) for ASCII, 3 bytes/cell (BGR) for pixel
+                    if (this.renderMode > 1) {
+                        this.codecDecoder = AscilineCodecApi.makeDecoder(this.pixelMode ? 3 : 4);
+                    } else {
+                        this.codecDecoder = null;
+                    }
+                    this.decodeQueue = Promise.resolve();
+
+                    this._setState('PLAYING');
+                    this.emit('init', {
+                        fps: this.targetFps, cols, rows,
+                        duration: this.duration,
+                        pixelMode: this.pixelMode,
+                        renderMode: this.renderMode,
+                        isWebcam: false
+                    });
+
+                    // Start render pipeline (audio-gated if audio is present)
+                    if (audioUrl && this.audioEl) {
+                        this._triggerPlaybackStart(myEpoch);
+                    } else {
+                        this._beginRendering();
+                    }
+
+                    headerParsed = true;
+                }
+
+                // ── Parse frame packets: [uint32 length][payload] ──
+                if (headerParsed) {
+                    while (parser.length >= 4) {
+                        const frameLen = parser.peek32BE();
+                        if (frameLen === null || parser.length < 4 + frameLen) break;
+
+                        parser.read(4); // consume length prefix
+                        const frameBytes = parser.read(frameLen);
+
+                        if (this.renderMode === 1) {
+                            // Mode 1: text frame — "{frameIndex}\n{ascii lines}"
+                            const text = textDec.decode(frameBytes);
+                            const nl   = text.indexOf('\n');
+                            const frameIndex = parseInt(text.substring(0, nl));
+                            this.frameBuffer.push({ data: text.substring(nl + 1), time: frameIndex / this.targetFps });
+                        } else if (this.codecDecoder) {
+                            // Binary codec frame — decode asynchronously to avoid blocking rAF
+                            const buf = frameBytes.buffer; // owned copy from _ByteStreamParser.read()
+                            this.framesInFlight++;
+                            this.decodeQueue = this.decodeQueue.then(async () => {
+                                await new Promise(r => setTimeout(r, 0)); // yield to rAF
+                                try {
+                                    const { frameIndex, frame } = await this.codecDecoder.decode(buf);
+                                    if (myEpoch === this.streamEpoch) {
+                                        this.frameBuffer.push({ data: frame, time: frameIndex / this.targetFps });
+                                    }
+                                } finally {
+                                    this.framesInFlight--;
+                                }
+                            });
+                        }
+                    }
+                }
+
+                if (done) {
+                    this._ascfIsStreaming = false;
+                    break;
+                }
+            }
+
+            // Wait for in-flight codec decodes to complete
+            await this.decodeQueue;
+            if (myEpoch !== this.streamEpoch) return; // superseded by seek/restart
+
+            if (this.options.loop) {
+                // Loop: reset decoder and replay from the beginning
+                if (this.codecDecoder && this.codecDecoder.reset) this.codecDecoder.reset();
+                this.readyToRender = false;
+                this._ascfAbortController = null;
+                this._connectAscf(ascfUrl, audioUrl);
+            } else {
+                // Wait for the render queue to drain before calling ENDED
+                const drain = () => new Promise(resolve => {
+                    const check = () => (this.frameBuffer.length === 0 && this.framesInFlight === 0)
+                        ? resolve()
+                        : setTimeout(check, 50);
+                    check();
+                });
+                await drain();
+                if (myEpoch === this.streamEpoch) this._finishStream('ENDED');
+            }
+
+        } catch (err) {
+            if (err && err.name !== 'AbortError') {
+                this.emit('error', err);
+                this._finishStream('ERROR');
+            }
+        }
+    }
+
 
     _triggerPlaybackStart(epochToMatch) {
         if (this.readyToRender || this.state !== 'PLAYING') return;
