@@ -625,7 +625,15 @@ Quick fixes for the most common issues. Full protocol/technical details will liv
 Live, browser-based showcase across multiple rendering modes: **[asciline.dev](https://www.asciline.dev)**
 
 ## Star History
-[![Star History Chart](https://stars.unv.one/svg/YusufB5/ASCILINE?theme=dark)](https://github.com/YusufB5/ASCILINE)
+## Star History
+
+<a href="https://www.star-history.com/?repos=yusufb5%2Fasciline&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=yusufb5/asciline&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=yusufb5/asciline&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=yusufb5/asciline&type=date&legend=top-left" />
+ </picture>
+</a>
 
 <a id="support"></a>
 ## Support ❤️
