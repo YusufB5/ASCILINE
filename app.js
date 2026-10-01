@@ -48,6 +48,7 @@ let targetFps = 24;
 let frameInterval = 1000 / targetFps;
 let renderMode = 1;
 let pixelMode = false;
+let pixelCodec = 'raw';
 let readyToRender = false;
 let pauseStartTime = 0;
 let duration = 0;
@@ -55,6 +56,13 @@ let isSeeking = false;
 let currentQueueIdx = 0;
 let audioOffset = 0;
 let isWebcamStream = false; // skips audio-sync gate and locks pause
+let renderRequestId = null;
+let cancelPlaybackStart = null;
+let playbackAttempt = 0;
+let audioClockActive = false;
+let pendingSeekId = null;
+let syncId = null; // null means an older server without clock coordination
+let resumeNeedsAudioSeek = false;
 
 
 // Grid & Dimensions
@@ -161,42 +169,101 @@ function buildCanvas(cols, rows) {
 // ═══════════════════════════════════════
 //  STARTUP SYNC LOGIC (VIDEO GATE)
 // ═══════════════════════════════════════
-const beginRendering = () => {
-    if (readyToRender) return;
+function stopRendering() {
+    if (renderRequestId !== null) cancelAnimationFrame(renderRequestId);
+    renderRequestId = null;
+}
+
+function scheduleRender() {
+    if (renderRequestId !== null) return;
+    renderRequestId = requestAnimationFrame(now => {
+        renderRequestId = null;
+        renderFrame(now);
+    });
+}
+
+function resetPlaybackStart() {
+    playbackAttempt++;
+    if (cancelPlaybackStart) cancelPlaybackStart();
+    cancelPlaybackStart = null;
+    readyToRender = false;
+    stopRendering();
+    stopBufferReports();
+}
+
+function resetFramePipeline() {
+    frameBuffer.length = 0;
+    framesInFlight = 0;
+    playbackMetrics = { decodeMs: 0, decoded: 0, renderMs: 0, rendered: 0,
+        lateDrops: 0, decodeErrors: 0, latestTime: null };
+    decodeQueue = Promise.resolve();
+    codecDecoder = typeof AscilineCodec !== 'undefined' && renderMode > 1 && (!pixelMode || pixelCodec === 'dct')
+        ? AscilineCodec.makeDecoder(pixelMode ? 3 : 4) : null;
+}
+
+function loadAudio() {
+    audioClockActive = false;
+    if (!audioEl || isWebcamStream) return;
+    audioEl.pause();
+    audioEl.src = `/audio?v=${currentQueueIdx}&start=${audioOffset}&t=${Date.now()}&epoch=${streamEpoch}`;
+    audioEl.volume = volumeSlider ? volumeSlider.value : 1.0;
+    audioEl.load();
+}
+
+const beginRendering = (withAudio = false) => {
+    if (readyToRender || state !== 'PLAYING' || pendingSeekId !== null) return;
+    if (cancelPlaybackStart) cancelPlaybackStart();
+    cancelPlaybackStart = null;
+    audioClockActive = withAudio;
     readyToRender = true;
-    streamStartTime = performance.now() - (audioOffset * 1000.0);
+    statusEl.textContent = 'Playing...';
+    const firstTime = frameBuffer.length ? frameBuffer[0].time : audioOffset;
+    streamStartTime = performance.now() - (firstTime * 1000.0);
+    frameCount = 0;
     lastRenderTime = performance.now();
     lastFpsUpdate = lastRenderTime;
-    requestAnimationFrame(renderFrame);
+    if (playPauseBtn) playPauseBtn.textContent = '❚❚';
+    if (syncId !== null && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'playback-ready', requestId: syncId, time: getMasterClock() }));
+    }
+    scheduleRender();
     startBufferReports();
 };
 
 const triggerPlaybackStart = (epochToMatch) => {
-    if (readyToRender || state !== 'PLAYING') return;
-    if (isWebcamStream) {
+    if (epochToMatch !== streamEpoch || readyToRender || cancelPlaybackStart ||
+        state !== 'PLAYING' || pendingSeekId !== null || !frameBuffer.length) return;
+    if (syncId !== null && frameBuffer.length < BUFFER_SIZE) return;
+    if (isWebcamStream || !audioEl) {
         beginRendering();
         return;
     }
-    if (audioEl) {
-        // The very first video frame has arrived and is ready.
-        // Now it is safe to start the audio clock.
-        audioEl.play().catch(() => {});
-        // Audio Gate: Wait for actual playback so clocks match exactly
-        if (audioEl.readyState >= 3) {
-            beginRendering();
-        } else {
-            audioEl.addEventListener('playing', () => {
-                if (epochToMatch !== streamEpoch) return;
-                beginRendering();
-            }, { once: true });
-            setTimeout(() => { 
-                if (epochToMatch !== streamEpoch) return;
-                if (!readyToRender) beginRendering(); 
-            }, 500);
-        }
-    } else {
-        beginRendering();
-    }
+    const attempt = ++playbackAttempt;
+    const expectedSource = audioEl.src;
+    const current = () => attempt === playbackAttempt && epochToMatch === streamEpoch && state === 'PLAYING';
+    const onPlaying = () => {
+        // This DOM element is reused across seeks. An old queued media event
+        // must not anchor the new timeline to the previous resource's clock.
+        if (current() && audioEl.currentSrc === expectedSource &&
+            audioEl.readyState >= 3 && !audioEl.paused) beginRendering(true);
+    };
+    const onUnavailable = () => {
+        if (!current()) return;
+        audioEl.pause();
+        beginRendering(false);
+    };
+    // Register once per playback attempt, never once per incoming frame.
+    // Metadata/readiness alone does not mean the audio clock is running.
+    const timer = setTimeout(onUnavailable, 2000);
+    cancelPlaybackStart = () => {
+        clearTimeout(timer);
+        audioEl.removeEventListener('playing', onPlaying);
+        audioEl.removeEventListener('error', onUnavailable);
+    };
+    statusEl.textContent = 'Starting audio...';
+    audioEl.addEventListener('playing', onPlaying);
+    audioEl.addEventListener('error', onUnavailable);
+    audioEl.play().then(onPlaying).catch(onUnavailable);
 };
 
 // ═══════════════════════════════════════
@@ -220,11 +287,26 @@ function connectWebSocket() {
     // Don't preload here — causes race conditions with vol=0 (204 response).
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${location.host}/ws?codec=adaptive`);
+    ws = new WebSocket(`${protocol}//${location.host}/ws?codec=adaptive&sync=1&pixel_codec=dct-v1`);
     ws.binaryType = 'arraybuffer';
 
     ws.onmessage = (event) => {
         if (typeof event.data === 'string') {
+            if (event.data.startsWith('SEEKED:')) {
+                const parts = event.data.split(':');
+                const requestId = Number(parts[1]);
+                if (requestId !== pendingSeekId) return;
+                pendingSeekId = null;
+                resumeNeedsAudioSeek = false;
+                syncId = requestId;
+                audioOffset = Number(parts[2]);
+                statusEl.textContent = 'Preparing playback...';
+                resetFramePipeline();
+                streamStartTime = performance.now() - audioOffset * 1000;
+                if (state === 'PAUSED') pauseStartTime = performance.now();
+                loadAudio();
+                return;
+            }
             if (event.data.startsWith('Error:')) {
                 hideToast();  // drop any "fetching..." notice; the fetch failed
                 statusEl.textContent = event.data;
@@ -242,11 +324,15 @@ function connectWebSocket() {
                 frameInterval = 1000 / targetFps;
                 renderMode = parseInt(p[2]);
                 pixelMode = (p.length > 5 && parseInt(p[5]) === 1);
+                pixelCodec = pixelMode && p[11] === 'dct' ? 'dct' : 'raw';
                 const currentQueueIndex = (p.length > 6) ? parseInt(p[6]) : null;
                 duration = (p.length > 7) ? parseFloat(p[7]) : 0;
                 const startOffset = (p.length > 8) ? parseFloat(p[8]) : 0;
                 const isWebcam = (p.length > 9 && parseInt(p[9]) === 1);
                 isWebcamStream = isWebcam;
+                syncId = !isWebcam && p.length > 10 ? Number(p[10]) : null;
+                pendingSeekId = null;
+                resetPlaybackStart();
                 currentQueueIdx = currentQueueIndex !== null ? currentQueueIndex : 0;
                 
                 if (seekBar) {
@@ -289,13 +375,9 @@ function connectWebSocket() {
                 
                 buildCanvas(parseInt(p[3]), parseInt(p[4]));
 
-                // Initialize adaptive codec decoder (pixel=3 bytes, ASCII color=4 bytes)
-                // Pixel mode explicitly bypasses the codec for maximum raw throughput
-                if (typeof AscilineCodec !== 'undefined' && renderMode > 1 && !pixelMode) {
-                    codecDecoder = AscilineCodec.makeDecoder(4);
-                } else {
-                    codecDecoder = null;
-                }
+                // DCT is explicitly negotiated. Each seek/reinit owns a new
+                // decoder so late results cannot change the new predictor.
+                resetFramePipeline();
 
                 // Sequential decode queue — reset on each new stream so deltas
                 // never race ahead of keyframes across playlist transitions.
@@ -311,20 +393,9 @@ function connectWebSocket() {
                 const wasPaused = (state === 'PAUSED');
                 readyToRender = false;
                 if (!wasPaused) state = 'PLAYING';
-
-
-
-                    if (audioEl && !isWebcam) {
-                        audioEl.pause();
-                        const qs = currentQueueIndex !== null ? `v=${currentQueueIndex}&` : '';
-                        const st = startOffset > 0 ? `start=${startOffset}&` : '';
-                        audioEl.src = `/audio?${qs}${st}t=${Date.now()}`;
-                        audioEl.volume = volumeSlider ? volumeSlider.value : 1.0;
-                        audioEl.load();
-                        // VIDEO GATE: Do not play audio or start rendering yet!
-                        // We will wait until the very first video frame has arrived
-                        // and been decoded into the frameBuffer.
-                    }
+                streamStartTime = performance.now() - audioOffset * 1000;
+                if (wasPaused) pauseStartTime = performance.now();
+                loadAudio();
 
                 // Re-push prefs after INIT — server filter state starts at defaults
                 // on each new stream, so a restored UI alone would not affect frames.
@@ -344,30 +415,44 @@ function connectWebSocket() {
             }
 
             // Mode 1: Text Frame with Timestamp
+            if (pendingSeekId !== null) return;
             const text = event.data;
             const newlineIdx = text.indexOf('\n');
             const frameIndex = parseInt(text.substring(0, newlineIdx));
             const frameTime = frameIndex / targetFps;
             const frameData = text.substring(newlineIdx + 1);
+            playbackMetrics.latestTime = frameTime;
             frameBuffer.push({ data: frameData, time: frameTime });
             triggerPlaybackStart(streamEpoch);
         } else {
+            if (pendingSeekId !== null) return;
             // Binary Frames — decoded via adaptive codec (raw/zlib/delta)
             if (codecDecoder) {
+                const epoch = streamEpoch;
+                const decoder = codecDecoder;
                 framesInFlight++;
                 // Chain onto the sequential queue so deltas always patch the
                 // correct preceding frame, never racing ahead of a keyframe.
-                decodeQueue = decodeQueue.then(() =>
-                    codecDecoder.decode(event.data).then(({ frameIndex, frame }) => {
+                decodeQueue = decodeQueue.then(() => {
+                    if (epoch !== streamEpoch) return;
+                    const decodeStarted = performance.now();
+                    return decoder.decode(event.data).then(({ frameIndex, frame }) => {
+                        if (epoch !== streamEpoch) return;
                         framesInFlight--;
                         const frameTime = frameIndex / targetFps;
+                        playbackMetrics.decodeMs += performance.now() - decodeStarted;
+                        playbackMetrics.decoded++;
+                        playbackMetrics.latestTime = frameTime;
                         frameBuffer.push({ data: frame, time: frameTime });
-                        triggerPlaybackStart(streamEpoch);
+                        while (frameBuffer.length > BUFFER_SIZE * 5) frameBuffer.shift();
+                        triggerPlaybackStart(epoch);
                     }).catch(e => {
+                        if (epoch !== streamEpoch) return;
                         framesInFlight--;
+                        playbackMetrics.decodeErrors++;
                         console.error("Decode error", e);
-                    })
-                );
+                    });
+                });
             } else {
                 // Fallback: legacy 4-byte header
                 const buffer = event.data;
@@ -375,6 +460,7 @@ function connectWebSocket() {
                 const frameIndex = view.getUint32(0, false);
                 const frameTime = frameIndex / targetFps;
                 const frameData = new Uint8Array(buffer, 4);
+                playbackMetrics.latestTime = frameTime;
                 frameBuffer.push({ data: frameData, time: frameTime });
                 triggerPlaybackStart(streamEpoch);
             }
@@ -412,9 +498,17 @@ function connectWebSocket() {
 
 function renderFrame(now) {
     if (state !== 'PLAYING' || !readyToRender) return;
-    requestAnimationFrame(renderFrame);
+    scheduleRender();
 
     const masterClock = getMasterClock();
+    if (now - lastFpsUpdate >= 1000) {
+        currentFps = Math.round(frameCount * 1000 / (now - lastFpsUpdate));
+        frameCount = 0;
+        lastFpsUpdate = now;
+        const modes = { 2: '64 Color', 3: '512 Color', 4: '32K Color', 5: '262K Color', 6: '16M Ultra' };
+        const label = (modes[renderMode] || 'B&W') + (pixelMode ? ' PIXEL' : '');
+        statusEl.textContent = `FPS: ${currentFps}/${Math.round(targetFps)} | Buf: ${frameBuffer.length} | ${label}`;
+    }
 
     if (!isSeeking && seekBar) {
         if (now - lastUiUpdateTime >= 100) {
@@ -441,6 +535,7 @@ function renderFrame(now) {
         // A/V Sync: Drop frames that are too far behind the master clock (catch up)
         while (frameBuffer.length > 0 && frameBuffer[0].time < masterClock - 0.1) {
             frameBuffer.shift();
+            playbackMetrics.lateDrops++;
         }
         
         if (frameBuffer.length === 0) return;
@@ -454,16 +549,9 @@ function renderFrame(now) {
     }
 
     const frame = frameObj.data;
+    const renderStarted = performance.now();
 
     frameCount++;
-    if (now - lastFpsUpdate >= 1000) {
-        currentFps = frameCount;
-        frameCount = 0;
-        lastFpsUpdate = now;
-        const modes = { 2: '64 Color', 3: '512 Color', 4: '32K Color', 5: '262K Color', 6: '16M Ultra' };
-        const label = (modes[renderMode] || 'B&W') + (pixelMode ? ' PIXEL' : '');
-        statusEl.textContent = `FPS: ${currentFps}/${Math.round(targetFps)} | Buf: ${frameBuffer.length} | ${label}`;
-    }
 
     lastRenderTime = now;
 
@@ -515,6 +603,8 @@ function renderFrame(now) {
         player.style.color = 'transparent';
         player.textContent = textDecoder.decode(selectionBuffer);
     }
+    playbackMetrics.renderMs += performance.now() - renderStarted;
+    playbackMetrics.rendered++;
 }
 
 // ═══════════════════════════════════════
@@ -526,6 +616,10 @@ function renderFrame(now) {
 // (framesInFlight). When it grows, the client is CPU-bound, and the server 
 // drops frames instead of making us inflate+delta-patch them.
 let framesInFlight = 0;
+// Epoch-local averages and counters for --debug server diagnostics. Decode time
+// excludes waiting for earlier packets; framesInFlight measures that queue.
+let playbackMetrics = { decodeMs: 0, decoded: 0, renderMs: 0, rendered: 0,
+    lateDrops: 0, decodeErrors: 0, latestTime: null };
 // Sequential promise chain that serialises async codec decodes so a fast
 // Delta never races ahead of a slow Keyframe/ZLIB inflate.
 let decodeQueue = Promise.resolve();
@@ -534,7 +628,15 @@ function startBufferReports() {
     stopBufferReports();
     bufferReportTimer = setInterval(() => {
         if (ws && ws.readyState === WebSocket.OPEN && state === 'PLAYING') {
-            ws.send(JSON.stringify({ type: 'buffer', depth: framesInFlight }));
+            ws.send(JSON.stringify({
+                type: 'buffer', depth: framesInFlight,
+                decodeMs: playbackMetrics.decoded ? playbackMetrics.decodeMs / playbackMetrics.decoded : null,
+                renderMs: playbackMetrics.rendered ? playbackMetrics.renderMs / playbackMetrics.rendered : null,
+                lagMs: playbackMetrics.latestTime === null ? null
+                    : Math.max(0, (getMasterClock() - playbackMetrics.latestTime) * 1000),
+                lateDrops: playbackMetrics.lateDrops,
+                decodeErrors: playbackMetrics.decodeErrors,
+            }));
         }
     }, 250);
 }
@@ -582,6 +684,12 @@ function hideStickyToast() {
 }
 
 function finishStream() {
+    resetPlaybackStart();
+    streamEpoch++;
+    pendingSeekId = null;
+    syncId = null;
+    audioClockActive = false;
+    resumeNeedsAudioSeek = false;
     state = 'IDLE';
     stopBufferReports();
     hideStickyToast();  // a fetch notice must never outlive the stream
@@ -607,8 +715,12 @@ function finishStream() {
 function togglePause() {
     if (isWebcamStream) return; // Can't pause a live broadcast!
     if (state === 'PLAYING') {
+        const pausedAt = getMasterClock();
+        resumeNeedsAudioSeek = readyToRender && !audioClockActive;
         state = 'PAUSED';
+        resetPlaybackStart();
         pauseStartTime = performance.now();
+        streamStartTime = pauseStartTime - pausedAt * 1000;
         
         if (audioEl && !audioEl.paused) {
             audioEl.pause();
@@ -621,8 +733,9 @@ function togglePause() {
         statusEl.textContent = '❚❚ PAUSED';
         statusEl.style.color = '#888';
     } else if (state === 'PAUSED') {
+        const resumeAt = getMasterClock();
         state = 'PLAYING';
-        readyToRender = true; // resuming an existing stream — don't block on audio gate
+        resetPlaybackStart();
         
         // Update streamStartTime to account for the pause duration
         const pauseDuration = performance.now() - pauseStartTime;
@@ -633,14 +746,6 @@ function togglePause() {
             ws.send(JSON.stringify({ type: 'pause', paused: false }));
         }
         
-        // Restore audio playback
-        if (audioEl && audioEl.paused) {
-            audioEl.play().catch(() => {});
-        }
-
-        // Flush stale buffer frames — A/V sync catch-up handles the rest
-        frameBuffer.length = 0;
-        
         container.classList.remove('paused');
         statusEl.textContent = 'Resuming...';
         statusEl.style.color = 'var(--accent-color)';
@@ -650,7 +755,10 @@ function togglePause() {
         lastRenderTime = performance.now();
         lastFpsUpdate = performance.now();
         frameCount = 0;
-        requestAnimationFrame(renderFrame);
+        // If autoplay/audio failed earlier, its currentTime may still be zero.
+        // Reload both tracks at the wall-clock position before trying again.
+        if (resumeNeedsAudioSeek) doSeek(resumeAt);
+        else triggerPlaybackStart(streamEpoch);
     }
 }
 
@@ -666,63 +774,37 @@ if (playPauseBtn) {
 // the audio from that point). Shared by the slider and the skip buttons.
 function doSeek(targetSec) {
     if (isWebcamStream) return; // Can't seek a live broadcast!
+    if (!Number.isFinite(targetSec)) return;
     if (duration) targetSec = Math.max(0, Math.min(targetSec, duration));
     if (seekBar) seekBar.value = targetSec;
     if (seekPlayed && duration) seekPlayed.style.transform = `scaleX(${Math.min(1, targetSec / duration)})`;
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'seek', time: targetSec }));
-    }
-
-    // Drop stale frames, then restart audio from the seek point
-    frameBuffer.length = 0;
+    resetPlaybackStart();
+    resumeNeedsAudioSeek = false;
+    statusEl.textContent = 'Seeking...';
+    streamEpoch++;
+    resetFramePipeline();
+    audioClockActive = false;
     audioOffset = targetSec;
-
-    if (audioEl) {
-        audioEl.pause();
-        streamEpoch++;
-        const myEpoch = streamEpoch;
-        audioEl.src = `/audio?v=${currentQueueIdx}&start=${targetSec}&t=${Date.now()}`;
-        audioEl.load();
-
-        if (state === 'PLAYING') {
-            readyToRender = false;
-            audioEl.play().catch(() => {});
-            const onAudioStart = () => {
-                if (!readyToRender) {
-                    readyToRender = true;
-                    streamStartTime = performance.now() - (targetSec * 1000.0);
-                    lastRenderTime = performance.now();
-                    lastFpsUpdate = performance.now();
-                    frameCount = 0;
-                    requestAnimationFrame(renderFrame);
-                }
-            };
-            if (audioEl.readyState >= 3) onAudioStart();
-            else {
-                audioEl.addEventListener('playing', () => {
-                    if (myEpoch !== streamEpoch) return;
-                    onAudioStart();
-                }, { once: true });
-                setTimeout(() => {
-                    if (myEpoch !== streamEpoch) return;
-                    onAudioStart();
-                }, 500);
-            }
-        } else {
-            streamStartTime = performance.now() - (targetSec * 1000.0);
-            if (state === 'PAUSED') pauseStartTime = performance.now();
-        }
-    } else {
-        streamStartTime = performance.now() - (targetSec * 1000.0);
-        if (state === 'PAUSED') pauseStartTime = performance.now();
+    streamStartTime = performance.now() - targetSec * 1000;
+    if (state === 'PAUSED') pauseStartTime = performance.now();
+    if (audioEl) audioEl.pause();
+    pendingSeekId = syncId !== null ? streamEpoch : null;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'seek', time: targetSec, requestId: streamEpoch }));
     }
+    // A coordinated server confirms the exact decoded position first. Frames
+    // arriving before that marker belong to the old timeline and are ignored.
+    if (pendingSeekId === null) loadAudio();
 }
 
 function getMasterClock() {
     // audioEl.currentTime is frozen when paused — correct in both states.
     // Only fall back to the wall-clock estimate when audio hasn't loaded yet.
-    if (audioEl && audioEl.readyState >= 1) return audioEl.currentTime + audioOffset;
+    if (pendingSeekId !== null) return audioOffset;
+    if (audioClockActive && audioEl && audioEl.readyState >= 1) return audioEl.currentTime + audioOffset;
+    if (state === 'PAUSED') return (pauseStartTime - streamStartTime) / 1000.0;
+    if (!readyToRender) return audioOffset;
     return (performance.now() - streamStartTime) / 1000.0;
 }
 

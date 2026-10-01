@@ -1,0 +1,21 @@
+[package]
+name = "asciline-native"
+version = "0.2.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Optional ASCILINE file decoder, character mapper and adaptive encoder"
+
+[lib]
+name = "_asciline_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
+ffmpeg-next = "8"
+flate2 = { version = "1", features = ["zlib"], default-features = false }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

@@ -39,7 +39,12 @@ class AsciiStreamServer:
         thumbnails=False,
         quality="lossless",
         cols=None,
-        rows=0
+        rows=0,
+        engine="python",
+        no_resolution_limit=False,
+        fps=None,
+        pixel_codec="raw",
+        dct_quality=70,
     ):
         self.source = source
         self.host = host
@@ -51,6 +56,16 @@ class AsciiStreamServer:
         self.quality = quality
         self.cols = cols
         self.rows = rows
+        self.engine = engine
+        self.no_resolution_limit = no_resolution_limit
+        from .playback import resolve_fps_limit
+        resolve_fps_limit(engine, pixel, fps)
+        self.fps = fps
+        from .pixel_profile import validate_profile_quality
+        if pixel_codec not in {"raw", "dct"}:
+            raise ValueError("pixel_codec must be raw or dct")
+        self.pixel_codec = pixel_codec
+        self.dct_quality = validate_profile_quality(dct_quality)
 
     def start(self):
         import uvicorn
@@ -79,6 +94,8 @@ class AsciiStreamServer:
         
         queue = build_queue(args)
         app.state.queue = queue
+        from asciline.engines import get_engine
+        app.state.engine = get_engine(self.engine)
         app.state.current_index = 0
         app.state.loop = self.loop
         app.state.tolerance = {"lossless": 0, "high": 4, "balanced": 8, "low": 16}.get(self.quality, 0)
@@ -87,6 +104,11 @@ class AsciiStreamServer:
         app.state.cache_limit = 10 * 1024**3
         app.state.cols = (self.cols if self.cols is not None else (450 if self.pixel else 200))
         app.state.rows = self.rows
+        app.state.no_resolution_limit = self.no_resolution_limit
+        app.state.fps = self.fps
+        app.state.pixel_codec = self.pixel_codec
+        app.state.dct_quality = self.dct_quality
 
         print(f"[ASCILINE] Starting server on http://{self.host}:{self.port} (source: {self.source})")
-        uvicorn.run(app, host=self.host, port=self.port)
+        uvicorn.run(app, host=self.host, port=self.port,
+                    ws_per_message_deflate=app.state.engine.name != "rust" and self.pixel_codec == "raw")

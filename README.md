@@ -140,7 +140,7 @@ Clients opt in with `/ws?codec=adaptive`; omit it and you get the original proto
 
 An optional `--quality {lossless,high,balanced,low}` enables lossy *temporal delta*: a color cell is only re-sent once it drifts past a tolerance from what the viewer already sees (the character plane stays exact), cutting the hard cases a further ~15–30% at imperceptible quality. Default is `lossless` (bit-exact).
 
-**Monitor bandwidth in real time:** pass `--debug` when launching the server to see live RAW vs WIRE byte comparisons and the compression ratio in your terminal.
+**Monitor bandwidth and playback:** pass `--debug` to see RAW vs WIRE rates and compression ratios, plus `[PERF]` reports for delivered FPS, frame production time, delivery lag, and skipped source frames. The root player also reports average decode/draw times and late-frame drops. A slow producer skips overdue source frames before encoding to stay near the audio clock; the requested FPS is a ceiling, not a guarantee on every machine or scene.
 
 > Verified two independent ways, both bit-exact: Python-encoded vectors decoded by `codec.js` in Node (`experiments/gen_vectors.py` → `experiments/check_vectors.js`), and a live `adaptive`-vs-`legacy` WebSocket diff (`experiments/test_e2e.js`). Generate test clips with `experiments/make_test_clips.sh`.
 
@@ -408,6 +408,53 @@ This installs the `ytdlp` extra defined in `pyproject.toml`, pulling in `yt-dlp`
 python stream_server.py video.mp4 --cols 240
 ```
 
+With automatic rows (the default), the server retains its performance caps:
+125,000 pixels or 12,000 ASCII cells, plus row and portrait limits. To preserve
+the requested columns, add `--no-resolution-limit` (alias: `--no-limit`). For
+example, a 1280x720 video with `--pixel --cols 750` uses 471x265 by default,
+or 750x422 with the flag. This applies to both Python and Rust engines and
+persists when switching ASCII/pixel modes. Larger grids increase server,
+network and browser work; lower `--cols` if playback falls behind. The flag
+does not remove FPS limits or native allocation checks. Explicit `--rows`
+continues to use the supplied dimensions, as before.
+
+```bash
+python stream_server.py video.mp4 --engine rust --pixel --cols 750 --no-resolution-limit
+```
+
+**Optional Rust engine:** after a local native build, use `--engine rust` for
+60 FPS pixel playback, or `--engine auto` to allow Python fallback. Python remains
+the default. See [Rust build and test instructions](rust_core/README.md);
+installing the base Python package does not build the native module.
+
+Live FPS defaults are **30 for ASCII with either engine**, **60 for Rust pixel**,
+and **30 for Python pixel**. Use `--fps N` to override the FPS ceiling separately
+from engine and resolution. For example, `--engine rust --mode 6 --fps 60`
+opts into 60 FPS ASCII; `--engine rust --pixel --fps 30` limits pixel playback.
+`--no-limit` only changes resolution. Switching ASCII/pixel modes recalculates
+the default FPS; an explicit `--fps` stays in effect. Frames are sampled at
+uniform source intervals, so 59.94 FPS becomes 29.97 with a 30 FPS ceiling,
+and 50 FPS becomes 25. Lower-rate sources are not interpolated. Higher FPS
+increases browser work and is not a guarantee of smooth playback.
+
+**Opt-in live DCT (pixel only):** the root demo player can negotiate the existing
+lossy tag-4 profile. Enable it with `--pixel-codec dct`; `--dct-quality 70`
+sets quality from 1 to 100 (lower is smaller and lossier). The raw transport
+remains the default. Start conservatively:
+
+```bash
+python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --dct-quality 70 --cols 450 --fps 30 --no-thumbnails
+```
+
+The grid rounds up to multiples of 16 for the DCT/YUV420 planes; the server
+prints the actual size. Seek and mode changes restart the predictor with a
+keyframe. Clients without the explicit DCT capability, including the current
+npm SDK, keep receiving raw pixels. Python can encode the same profile with
+`--engine python`; Rust uses the native implementation after rebuilding.
+DCT reduces bandwidth at the cost of image fidelity and extra encode/decode
+work, so raw-pixel FPS does not predict DCT FPS. See the measured limitations
+in [the Rust integration notes](experiments/rust_audit/DCT_INTEGRATION.md).
+
 **YouTube / URL (requires the `ytdlp` extra):**
 ```bash
 python stream_server.py "https://youtu.be/VIDEO_ID" --cols 240
@@ -479,7 +526,7 @@ ASCILINE ships with a `Dockerfile` and `docker-compose.yml` for running the live
 docker compose up --build
 ```
 
-This builds the image and starts `stream_server.py --folder videos --host 0.0.0.0 --port 8000`, exposing the web UI on `http://localhost:8000`. `docker-compose.yml` mounts `./videos` on the host to `/app/videos` in the container — drop your `.mp4`/`.mkv`/etc. files into your local `videos/` folder and they'll show up automatically, no rebuild needed. `stdin_open`/`tty` are enabled so interactive terminal prompts still work; the high-FPS y/n confirmation prompt is skipped automatically when running in Docker.
+This builds the image and starts `stream_server.py --folder videos --host 0.0.0.0 --port 8000`, exposing the web UI on `http://localhost:8000`. `docker-compose.yml` mounts `./videos` on the host to `/app/videos` in the container — drop your `.mp4`/`.mkv`/etc. files into your local `videos/` folder and they'll show up automatically, no rebuild needed. `stdin_open`/`tty` are enabled for interactive terminal commands. High-FPS sources are automatically sampled to the selected FPS ceiling.
 
 ### Plain Docker
 

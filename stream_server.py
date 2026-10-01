@@ -54,6 +54,10 @@ from contextlib import asynccontextmanager
 # Import the existing engine (ascii_video_player2.py)
 from ascii_video_player2 import VideoDecoder, AsciiMapper
 from codec import encode_frame
+from asciline.engines import get_engine
+from asciline.media_runtime import ffmpeg_executable
+from asciline.playback import resolve_fps_limit, frame_sampling
+from asciline.pixel_profile import PixelProfile, align_profile_grid, validate_profile_quality
 
 # ── FILTER PALETTES ──────────────────────────────────────────────────────────
 # Named character palettes that the client can switch between at runtime.
@@ -184,53 +188,40 @@ def get_video_dimensions(path: str) -> tuple[int, int]:
     return w, h
 
 
-def calc_auto_dimensions(cols: int, vid_w: int, vid_h: int, pixel_mode: bool) -> tuple[int, int]:
+def calc_auto_dimensions(
+    cols: int, vid_w: int, vid_h: int, pixel_mode: bool,
+    *, no_resolution_limit: bool = False,
+) -> tuple[int, int]:
     """
     Calculate grid dimensions preserving video aspect ratio.
     ASCII mode: characters are ~2x taller than wide, so divide by 2.
     Pixel mode: cells are square (CSS stretches), no correction needed.
+    Apply the existing performance caps unless explicitly disabled.
     """
     ratio = vid_w / max(vid_h, 1)
-
-    if vid_h > vid_w:
-        # Vertical / Portrait video (e.g. YouTube Shorts, Reels, 9:16).
+    if not no_resolution_limit and vid_h > vid_w:
         if pixel_mode:
-            # In vertical videos, keeping 450 columns blows up rows to 800 (360,000 pixels = 1.1 MB/frame).
-            # That blasts 40 MB/s over WebSocket, saturating TCP buffers and causing 2-3 second freezes.
-            # Scale columns to match the standard horizontal budget (~115,000 pixels).
-            pixel_cols_cap = max(160, min(cols, round((115000 * ratio) ** 0.5)))
-            cols = pixel_cols_cap
+            cols = max(160, min(cols, round((115000 * ratio) ** 0.5)))
         else:
-            # In ASCII mode, using 200 columns blows up rows to 180+ (36,000+ characters),
-            # crushing the letters together into illegible stripes and tanking the browser's
-            # 2D canvas fillText rendering to 10 FPS.
-            portrait_cols_cap = max(60, min(cols, round(cols * ratio * 0.85)))
-            cols = portrait_cols_cap
+            cols = max(60, min(cols, round(cols * ratio * 0.85)))
 
-    # Pixel mode uses GPU-accelerated / direct Uint8Array putImageData → generous cap
-    # ASCII mode uses CPU fillText per cell → tight cap to prevent stutter on vertical videos
-    MAX_ROWS = 640 if pixel_mode else 120
-    
     if pixel_mode:
         rows = max(1, round(cols / ratio))
     else:
         rows = max(1, round(cols / ratio / 2))
-        
-    if rows > MAX_ROWS:
-        # Scale down BOTH cols and rows to preserve aspect ratio
-        scale = MAX_ROWS / rows
-        rows = MAX_ROWS
-        cols = max(1, round(cols * scale))
 
-    # Safety budget cap:
-    # ASCII mode: max 12,000 cells (CPU fillText limitation)
-    # Pixel mode: max 125,000 pixels (~10 MB/s bandwidth & JS putImageData limit)
-    MAX_TOTAL = 125000 if pixel_mode else 12000
-    if (cols * rows) > MAX_TOTAL:
-        scale = (MAX_TOTAL / (cols * rows)) ** 0.5
-        cols = max(1, round(cols * scale))
-        rows = max(1, round(rows * scale))
-        
+    if not no_resolution_limit:
+        max_rows = 640 if pixel_mode else 120
+        if rows > max_rows:
+            scale = max_rows / rows
+            rows = max_rows
+            cols = max(1, round(cols * scale))
+
+        max_total = 125000 if pixel_mode else 12000
+        if cols * rows > max_total:
+            scale = (max_total / (cols * rows)) ** 0.5
+            cols = max(1, round(cols * scale))
+            rows = max(1, round(rows * scale))
     return cols, rows
 
 # Serve only whitelisted static files (security: prevents directory traversal)
@@ -447,9 +438,12 @@ async def audio_stream(v: int | None = None, start: float = 0.0):
     # Map 1-5 → 1.0x-2.0x FFmpeg volume
     ffmpeg_vol = 1.0 + (vol_level - 1) * 0.25
 
+    engine = getattr(app.state, "engine", None)
+    executable = ffmpeg_executable(native=engine is not None and engine.name == "rust")
+
     async def audio_generator():
         ffmpeg_cmd = [
-            "ffmpeg",
+            executable,
             "-nostdin"
         ]
         if start > 0:
@@ -534,8 +528,10 @@ def _build_scrub_sprite(video_path: str, max_count: int = 64, cell_w: int = 160)
     # Sequential decode (no per-frame seeking), so this is fast even on long clips.
     vf = f"fps={n}/{duration:.3f},scale={cell_w}:{cell_h},tile={cols}x{rows}"
     try:
+        engine = getattr(app.state, "engine", None)
+        executable = ffmpeg_executable(native=engine is not None and engine.name == "rust")
         proc = subprocess.run(
-            ["ffmpeg", "-nostdin", "-i", video_path, "-vf", vf,
+            [executable, "-nostdin", "-i", video_path, "-vf", vf,
              "-frames:v", "1", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg",
              "-loglevel", "error", "pipe:1"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -635,6 +631,11 @@ async def websocket_endpoint(websocket: WebSocket):
     # Defaults to adaptive=True unless caller explicitly asks for codec=raw.
     codec_param = websocket.query_params.get("codec", "adaptive")
     adaptive = codec_param != "raw" and codec_param != "legacy"
+    sync_requested = websocket.query_params.get("sync") == "1"
+    profile_capable = (sync_requested and adaptive
+                       and websocket.query_params.get("pixel_codec") == "dct-v1")
+    profile_enabled = getattr(app.state, "pixel_codec", "raw") == "dct"
+    profile_quality = getattr(app.state, "dct_quality", 70)
     tolerance = getattr(app.state, "tolerance", 0)  # lossy colour drift budget
     # Backwards compatibility if clients send depth etc.
 
@@ -701,7 +702,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
             try:
                 # Initialize decoder with dummy size to fetch dimensions without double-probing
-                decoder = VideoDecoder(
+                engine = getattr(app.state, "engine", None) or get_engine("python")
+                decoder = engine.decoder(
                     path=video_path,
                     cols=2,
                     rows=2,
@@ -720,17 +722,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             vid_w, vid_h = decoder.vid_w, decoder.vid_h
+            dct_active = profile_enabled and profile_capable and pixel_mode and not is_webcam
 
             if rows_cfg == 0:
-                cols, rows = calc_auto_dimensions(cols, vid_w, vid_h, pixel_mode)
+                cols, rows = calc_auto_dimensions(
+                    cols, vid_w, vid_h, pixel_mode,
+                    no_resolution_limit=getattr(app.state, "no_resolution_limit", False),
+                )
                 print(f"[AUTO] {vid_w}x{vid_h} → grid {cols}x{rows}")
             else:
                 rows = rows_cfg
 
-            decoder._size = (cols, rows)  # Apply calculated size
+            if dct_active:
+                cols, rows = align_profile_grid(cols, rows)
+                print(f"[DCT] grid {cols}x{rows} | quality {profile_quality}")
+            decoder.resize(cols, rows)
+            profile_encoder = PixelProfile(decoder.engine, cols, rows, profile_quality) if dct_active else None
             mapper       = AsciiMapper()
             source_fps   = decoder.fps
-            MAX_FPS      = 30
+            requested_fps = getattr(app.state, "fps", None)
+            MAX_FPS = resolve_fps_limit(decoder.engine.name, pixel_mode, requested_fps)
+            print(f"[ENGINE] {decoder.engine.name} | FPS limit: {MAX_FPS}")
             char_byte_lut= np.array([ord(c) for c in mapper._lut], dtype=np.uint8)
 
             # ── RUNTIME FILTERS (contrast / gamma / brightness / invert / sharpness / palette) ──
@@ -747,18 +759,17 @@ async def websocket_endpoint(websocket: WebSocket):
             qb           = {6: 0, 5: 2, 4: 3, 3: 5, 2: 6}.get(render_mode, 0)
 
             # ── FPS DECIMATION ──
-            # If source > 30 FPS, skip every Nth frame using grab() (no decode).
-            # This halves CPU load for 60 FPS sources.
-            if source_fps > MAX_FPS:
-                skip_n = round(source_fps / MAX_FPS)  # e.g. 60/30 = 2
-                effective_fps = source_fps / skip_n
-            else:
-                skip_n = 1
-                effective_fps = source_fps
+            # The default depends on render mode; --fps explicitly overrides it.
+            skip_n, effective_fps = frame_sampling(source_fps, MAX_FPS)
             frame_t = 1.0 / effective_fps
 
             duration = decoder.frame_count / decoder.fps if decoder.fps > 0 else 0
-            await websocket.send_text(f"INIT:{effective_fps}:{render_mode}:{cols}:{rows}:{int(pixel_mode)}:{queue_index}:{duration:.3f}:0:{int(is_webcam)}")
+            sync_playback = sync_requested and not is_webcam
+            sync_id = 0
+            sync_suffix = f":{sync_id}" if sync_playback else ""
+            if sync_playback and profile_capable:
+                sync_suffix += ":dct" if dct_active else ":raw"
+            await websocket.send_text(f"INIT:{effective_fps}:{render_mode}:{cols}:{rows}:{int(pixel_mode)}:{queue_index}:{duration:.3f}:0:{int(is_webcam)}{sync_suffix}")
             if skip_n > 1:
                 print(f"[FPS CAP] {source_fps} FPS → {effective_fps} FPS (skip every {skip_n} frames)")
 
@@ -767,9 +778,16 @@ async def websocket_endpoint(websocket: WebSocket):
             import struct
             import time
             start_time = asyncio.get_event_loop().time()
-            bw_start_time = time.time()
+            bw_start_time = asyncio.get_event_loop().time()
             bw_bytes_sent = 0
             bw_raw_bytes = 0
+            produced_count = 0
+            produce_ms_total = 0.0
+            produce_ms_max = 0.0
+            stage_totals = [0.0] * 4  # source, process/encode, executor handoff, send
+            clock_drops = 0
+            backlog_drops = 0
+            client_perf = {}
             debug_mode = getattr(app.state, "debug", False)
             frame_index = 0
             prev_frame = None  # previous framebuffer snapshot for delta coding
@@ -784,6 +802,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
             cmd_queue = asyncio.Queue()
             is_paused = False
+            # Send a small preroll, then wait until this client's clock has
+            # actually started. Decode/MP3 startup time must not count as play.
+            awaiting_ready = sync_playback
+            prefill_remaining = 4
 
             async def receive_commands():
                 try:
@@ -791,11 +813,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         msg = await websocket.receive_json()
                         await cmd_queue.put(msg)
                 except Exception:
-                    pass
+                    await cmd_queue.put({"type": "disconnect"})
             
             receive_task = asyncio.create_task(receive_commands())
 
-            raw_frame_num = 0
+            needs_frame_skip = False
 
             # ── THREAD-OFFLOADED FRAME PRODUCER ──
             # Bundles ALL CPU work (decode + process + encode) into one
@@ -804,20 +826,35 @@ async def websocket_endpoint(websocket: WebSocket):
             def produce(pf, fi):
                 """Decode, process, encode one frame. Returns None on EOF.
                 pf = prev_frame, fi = frame_index."""
-                for _ in range(skip_n - 1):
-                    if not decoder.grab():
-                        return None
+                nonlocal needs_frame_skip
+                source_started = time.perf_counter()
+                # Preserve the first frame at startup/seek. Skip only between
+                # output frames, so the decoder's retained seek frame is used.
+                if needs_frame_skip:
+                    for _ in range(skip_n - 1):
+                        if not decoder.grab():
+                            return None
                 try:
                     gray_frame, bgr_frame = next(decoder)
                 except StopIteration:
                     return None
+                needs_frame_skip = True
+                source_finished = time.perf_counter()
+
+                def produced(kind, data, previous, raw_size, wire_size):
+                    return (kind, data, previous, raw_size, wire_size,
+                            (source_finished - source_started) * 1000,
+                            (time.perf_counter() - source_finished) * 1000)
 
                 if pixel_mode:
                     raw_sz = 4 + rows * cols * 3
+                    if profile_encoder is not None:
+                        packet = profile_encoder.encode(bgr_frame, fi)
+                        return produced('bytes', packet, pf, raw_sz, len(packet))
                     struct.pack_into(">I", pixel_send_buf, 0, fi)
                     pixel_send_buf[4:] = bgr_frame.tobytes()
                     buf = bytes(pixel_send_buf)
-                    return ('bytes', buf, pf, raw_sz, len(buf))
+                    return produced('bytes', buf, pf, raw_sz, len(buf))
                 else:
                     # ── APPLY SHARPNESS (float32 to avoid uint8 clamping artifacts) ──
                     if sharpness_kernel is not None:
@@ -829,36 +866,45 @@ async def websocket_endpoint(websocket: WebSocket):
                         gray_frame = cv2.LUT(gray_frame, gray_lut)
                     
                     # Proportional mapping: evenly distribute 0-255 across 0 to (_n - 1)
-                    indices = (gray_frame.astype(np.uint16) * (mapper._n - 1)) // 255
-                    np.clip(indices, 0, mapper._n - 1, out=indices) # Defensive clip
+                    native = decoder.engine.native
+                    if native is None:
+                        indices = (gray_frame.astype(np.uint16) * (mapper._n - 1)) // 255
+                        np.clip(indices, 0, mapper._n - 1, out=indices)
 
                     if render_mode == 1:
-                        char_matrix = mapper._lut[indices]
-                        lines = [''.join(row) for row in char_matrix]
-                        payload = f"{fi}\n" + '\n'.join(lines)
+                        if native is not None:
+                            text = native.build_text_frame(gray_frame, ''.join(mapper._lut))
+                        else:
+                            char_matrix = mapper._lut[indices]
+                            text = '\n'.join(''.join(row) for row in char_matrix)
+                        payload = f"{fi}\n" + text
                         sz = len(payload.encode('utf-8'))
-                        return ('text', payload, pf, sz, sz)
+                        return produced('text', payload, pf, sz, sz)
                     else:
-                        char_codes = char_byte_lut[indices]
-                        rgb = bgr_frame[:, :, ::-1]
-                        if qb > 0:
-                            rgb = (rgb >> qb) << qb
-                        frame_buf[:, :, 0] = char_codes
-                        frame_buf[:, :, 1:] = rgb
+                        if native is not None:
+                            encoded_frame = native.build_frame_buf(gray_frame, bgr_frame.reshape(-1), char_byte_lut, qb)
+                        else:
+                            char_codes = char_byte_lut[indices]
+                            rgb = bgr_frame[:, :, ::-1]
+                            if qb > 0:
+                                rgb = (rgb >> qb) << qb
+                            frame_buf[:, :, 0] = char_codes
+                            frame_buf[:, :, 1:] = rgb
+                            encoded_frame = frame_buf
                         raw_sz = 4 + rows * cols * 4
                         if adaptive:
-                            msg, npf = encode_frame(
-                                frame_buf.copy(), pf, fi, 3, tolerance)
-                            return ('bytes', msg, npf, raw_sz, len(msg))
+                            msg, npf = decoder.engine.encode_frame(
+                                encoded_frame.copy(), pf, fi, 3, tolerance)
+                            return produced('bytes', msg, npf, raw_sz, len(msg))
                         else:
                             struct.pack_into(">I", ascii_send_buf, 0, fi)
-                            ascii_send_buf[4:] = frame_buf.tobytes()
+                            ascii_send_buf[4:] = encoded_frame.tobytes()
                             buf = bytes(ascii_send_buf)
-                            return ('bytes', buf, pf, raw_sz, len(buf))
+                            return produced('bytes', buf, pf, raw_sz, len(buf))
 
             # ── BACKPRESSURE FRAME-DROP ──
-            # Cheaply advance the source by one effective frame WITHOUT decoding,
-            # processing, encoding, or sending it. Used when the client reports a
+            # Advance the source without output conversion, encoding or sending.
+            # Inter-frame video may still require source decoding. Used for a
             # growing backlog: we skip the frame instead of making the client pay
             # the inflate+delta-patch cost for a frame it would only drop after.
             # prev_frame is intentionally left untouched by the caller, so the next
@@ -870,12 +916,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         return False
                 return True
 
-            # Drop once the client's decoded-frame backlog exceeds this. The client
-            # render loop keeps a ~BUFFER_SIZE (4) jitter buffer, so 8 is one extra
-            # buffer of slack before we start shedding. MAX_CONSEC_DROPS guarantees
-            # liveness: we always send a real frame at least this often, so a stalled
-            # or non-reporting client can never be starved and a large delta gap is
-            # bounded.
+            # Shed source frames after two reports of excessive pending codec
+            # work. Cap consecutive backlog drops so the client keeps receiving
+            # updates. Clock catch-up below is independent of this queue limit.
             BACKLOG_HIGH = 15
             MAX_CONSEC_DROPS = max(1, int(round(effective_fps * 0.3)))  # ~300ms of frames
             client_backlog = 0   # latest depth reported by the client (0 = unknown/healthy)
@@ -884,27 +927,67 @@ async def websocket_endpoint(websocket: WebSocket):
 
             _loop = asyncio.get_event_loop()
 
+            def reset_metrics():
+                nonlocal bw_start_time, bw_bytes_sent, bw_raw_bytes
+                nonlocal produced_count, produce_ms_total, produce_ms_max
+                nonlocal stage_totals
+                nonlocal clock_drops, backlog_drops, client_perf
+                bw_start_time = _loop.time()
+                bw_bytes_sent = bw_raw_bytes = produced_count = 0
+                produce_ms_total = produce_ms_max = 0.0
+                stage_totals = [0.0] * 4
+                clock_drops = backlog_drops = 0
+                client_perf = {}
+
+            reset_metrics()
+
             try:
                 while True:
                     while not cmd_queue.empty():
                         msg = cmd_queue.get_nowait()
-                        if msg.get("type") == "pause":
+                        if msg.get("type") == "disconnect":
+                            raise WebSocketDisconnect(code=1000)
+                        elif msg.get("type") == "pause":
                             is_paused = msg.get("paused", False)
                             if not is_paused:
                                 start_time = _loop.time() - (frame_index * frame_t)
-                                bw_start_time = time.time()
+                                reset_metrics()
+                                if sync_playback:
+                                    awaiting_ready = True
+                                    prefill_remaining = 4
+                        elif msg.get("type") == "playback-ready" and sync_playback:
+                            if msg.get("requestId") != sync_id or is_paused:
+                                continue
+                            clock = float(msg.get("time", frame_index * frame_t))
+                            if not math.isfinite(clock) or clock < 0:
+                                continue
+                            start_time = _loop.time() - clock
+                            awaiting_ready = False
+                            reset_metrics()
                         elif msg.get("type") == "seek":
                             target_sec = float(msg.get("time", 0))
                             await _loop.run_in_executor(None, decoder.seek, target_sec)
+                            needs_frame_skip = False
+                            if profile_encoder is not None:
+                                profile_encoder.reset()
                             prev_frame = None
-                            frame_index = int(target_sec * effective_fps)
+                            frame_index = decoder.frame_index_after_seek(target_sec, effective_fps)
                             start_time = _loop.time() - (frame_index * frame_t)
-                            bw_start_time = time.time()
+                            reset_metrics()
                             client_backlog = 0  # stale across a seek
                             consec_high_reports = 0
                             consec_drops = 0
+                            if sync_playback:
+                                sync_id = msg.get("requestId", sync_id + 1)
+                                awaiting_ready = True
+                                prefill_remaining = 4
+                                # FIFO ordering separates all pre-seek frames
+                                # from the new keyframe, even across quick seeks.
+                                actual_time = frame_index * frame_t
+                                await websocket.send_text(f"SEEKED:{sync_id}:{actual_time:.9f}")
                         elif msg.get("type") == "buffer":
-                            # Client's current decoded-frame backlog (frameBuffer.length).
+                            # In-flight codec work, not the decoded render buffer.
+                            # Old root/SDK clients may omit optional timing fields.
                             try:
                                 client_backlog = max(0, int(msg.get("depth", 0)))
                                 if client_backlog > BACKLOG_HIGH:
@@ -914,38 +997,67 @@ async def websocket_endpoint(websocket: WebSocket):
                             except (TypeError, ValueError):
                                 client_backlog = 0
                                 consec_high_reports = 0
+                            client_perf = {
+                                key: float(value) for key in
+                                ("decodeMs", "renderMs", "lagMs", "lateDrops", "decodeErrors")
+                                if isinstance(value := msg.get(key), (int, float))
+                                and math.isfinite(value) and 0 <= value <= 1e9
+                            }
                         elif msg.get("type") == "reinit":
                             # Soft reload: Toggle pixel mode and send new INIT
                             pixel_mode = bool(msg.get("pixel", pixel_mode))
+                            dct_active = profile_enabled and profile_capable and pixel_mode and not is_webcam
                             
                             cols_override = entry.get("cols_override")
                             cols = cols_override if cols_override is not None else (450 if pixel_mode else 200)
                             
                             if rows_cfg == 0:
-                                cols, rows = calc_auto_dimensions(cols, vid_w, vid_h, pixel_mode)
+                                cols, rows = calc_auto_dimensions(
+                                    cols, vid_w, vid_h, pixel_mode,
+                                    no_resolution_limit=getattr(app.state, "no_resolution_limit", False),
+                                )
                                 print(f"[REINIT] {vid_w}x{vid_h} → grid {cols}x{rows}")
                             else:
                                 rows = rows_cfg
                             
-                            decoder._size = (cols, rows)
-                            decoder._skip_gray = pixel_mode
+                            if dct_active:
+                                cols, rows = align_profile_grid(cols, rows)
+                                print(f"[DCT] grid {cols}x{rows} | quality {profile_quality}")
+                            decoder.resize(cols, rows)
+                            profile_encoder = PixelProfile(decoder.engine, cols, rows, profile_quality) if dct_active else None
+                            decoder.set_skip_gray(pixel_mode)
+                            MAX_FPS = resolve_fps_limit(decoder.engine.name, pixel_mode, requested_fps)
+                            skip_n, effective_fps = frame_sampling(source_fps, MAX_FPS)
+                            frame_t = 1.0 / effective_fps
+                            MAX_CONSEC_DROPS = max(1, int(round(effective_fps * 0.3)))
+                            print(f"[FPS] limit: {MAX_FPS:g} | effective: {effective_fps:g}")
                             if render_mode > 1:
                                 frame_buf = np.empty((rows, cols, 4), dtype=np.uint8)
                             if pixel_mode:
                                 pixel_send_buf = bytearray(4 + rows * cols * 3)
+                            elif render_mode > 1:
+                                ascii_send_buf = bytearray(4 + rows * cols * 4)
                             
                             duration = decoder.frame_count / decoder.fps if decoder.fps > 0 else 0
                             target_sec = float(msg.get("time", 0))
-                            await websocket.send_text(f"INIT:{effective_fps}:{render_mode}:{cols}:{rows}:{int(pixel_mode)}:{queue_index}:{duration:.3f}:{target_sec}:{int(is_webcam)}")
-                            
                             await _loop.run_in_executor(None, decoder.seek, target_sec)
+                            needs_frame_skip = False
                             prev_frame = None
-                            frame_index = int(target_sec * effective_fps)
+                            frame_index = decoder.frame_index_after_seek(target_sec, effective_fps)
                             start_time = _loop.time() - (frame_index * frame_t)
-                            bw_start_time = time.time()
+                            reset_metrics()
                             client_backlog = 0
                             consec_high_reports = 0
                             consec_drops = 0
+                            if sync_playback:
+                                sync_id += 1
+                                awaiting_ready = True
+                                prefill_remaining = 4
+                                target_sec = frame_index * frame_t
+                            sync_suffix = f":{sync_id}" if sync_playback else ""
+                            if sync_playback and profile_capable:
+                                sync_suffix += ":dct" if dct_active else ":raw"
+                            await websocket.send_text(f"INIT:{effective_fps}:{render_mode}:{cols}:{rows}:{int(pixel_mode)}:{queue_index}:{duration:.3f}:{target_sec}:{int(is_webcam)}{sync_suffix}")
                         elif msg.get("type") == "filter":
                             # ── RUNTIME FILTER UPDATE ──
                             # Rebuild the mapper / LUT only when values actually change.
@@ -1013,20 +1125,35 @@ async def websocket_endpoint(websocket: WebSocket):
                     if is_paused:
                         await asyncio.sleep(0.1)
                         continue
+                    if awaiting_ready and prefill_remaining <= 0:
+                        await asyncio.sleep(0.01)
+                        continue
 
-                    # ── BACKPRESSURE ──
+                    # ── CLOCK CATCH-UP / BACKPRESSURE ──
+                    # A slow producer can lag audio even with an empty client queue.
+                    # Skip overdue SOURCE frames before encoding; otherwise every
+                    # packet is >100ms late and the player discards video forever.
+                    # Catch up at 25ms, leaving 75ms of the player's 100ms late
+                    # budget for encode, transit, decode and the next paint. Never drop
+                    # preroll, nor an already encoded DCT packet (predictor chain).
+                    behind_clock = (not is_webcam and not awaiting_ready
+                                    and _loop.time() - start_time - frame_index * frame_t > 0.025)
                     # If the client is behind, skip this frame instead of sending one
                     # it will only decode-then-drop. Advancing the source keeps video
                     # time-aligned with the audio/wall clock; prev_frame is held so the
-                    # next sent frame is a correct delta across the gap. MAX_CONSEC_DROPS
-                    # caps the gap and guarantees we never starve the client.
-                    if consec_high_reports >= 2 and consec_drops < MAX_CONSEC_DROPS:
-                        print(f"[Backpressure] dropping frame {frame_index}, client_backlog={client_backlog}, consec_drops={consec_drops}", flush=True)
+                    # next sent frame is a correct delta across the gap.
+                    shed_backlog = (not awaiting_ready and consec_high_reports >= 2
+                                    and consec_drops < MAX_CONSEC_DROPS)
+                    if behind_clock or shed_backlog:
                         advanced = await _loop.run_in_executor(None, advance_one)
                         if not advanced:
                             break
-                        client_backlog -= 1   # optimistic; corrected by next report
-                        consec_drops += 1
+                        if behind_clock:
+                            clock_drops += 1
+                        else:
+                            backlog_drops += 1
+                            client_backlog = max(0, client_backlog - 1)
+                            consec_drops += 1
                         frame_index += 1
                         elapsed = _loop.time() - start_time
                         wait = (frame_index * frame_t) - elapsed
@@ -1037,36 +1164,60 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
                     # ALL CPU work in thread pool — event loop stays 100% free
-                    t_before = time.time()
+                    t_before = time.perf_counter()
                     result = await _loop.run_in_executor(
                         None, produce, prev_frame, frame_index)
+                    produce_ms = (time.perf_counter() - t_before) * 1000
                     
-                    if is_webcam and (time.time() - t_before) < 0.005:
+                    if is_webcam and produce_ms < 5:
                         # Safety net: Prevent 100% CPU runaway if OpenCV becomes non-blocking
                         await asyncio.sleep(0.01)
 
                     if result is None:
                         break
 
-                    send_type, data, prev_frame, raw_size, wire_size = result
+                    send_type, data, prev_frame, raw_size, wire_size, source_ms, encode_ms = result
 
+                    send_started = time.perf_counter()
                     if send_type == 'text':
                         await websocket.send_text(data)
                     else:
                         await websocket.send_bytes(data)
+                    send_ms = (time.perf_counter() - send_started) * 1000
+                    if awaiting_ready:
+                        prefill_remaining -= 1
 
                     bw_bytes_sent += wire_size
                     bw_raw_bytes += raw_size
+                    produced_count += 1
+                    produce_ms_total += produce_ms
+                    produce_ms_max = max(produce_ms_max, produce_ms)
+                    for i, value in enumerate((source_ms, encode_ms,
+                                               max(0, produce_ms - source_ms - encode_ms), send_ms)):
+                        stage_totals[i] += value
 
-                    current_time = time.time()
+                    current_time = _loop.time()
                     if debug_mode and current_time - bw_start_time >= 1.0:
-                        raw_kbps = bw_raw_bytes / 1024
-                        wire_kbps = bw_bytes_sent / 1024
+                        interval = current_time - bw_start_time
+                        raw_kbps = bw_raw_bytes / 1024 / interval
+                        wire_kbps = bw_bytes_sent / 1024 / interval
                         ratio = raw_kbps / wire_kbps if wire_kbps > 0 else 0
                         print(f"[BW] RAW: {raw_kbps:.1f} KB/s | WIRE: {wire_kbps:.1f} KB/s | {ratio:.1f}x compression")
+                        lag_ms = max(0, (current_time - start_time - frame_index * frame_t) * 1000)
+                        client_stats = " ".join(f"{key}={value:.1f}" for key, value in client_perf.items()) or "unavailable"
+                        stage_stats = "/".join(f"{value / produced_count:.1f}" for value in stage_totals)
+                        print(f"[PERF] sent={produced_count / interval:.1f} fps | "
+                              f"produce_avg/max={produce_ms_total / produced_count:.1f}/{produce_ms_max:.1f} ms | "
+                              f"source/encode/handoff/send={stage_stats} ms | "
+                              f"send_lag={lag_ms:.1f} ms | skip_clock/backlog={clock_drops}/{backlog_drops} | "
+                              f"decode_queue={client_backlog} | client: {client_stats}", flush=True)
                         bw_start_time = current_time
                         bw_bytes_sent = 0
                         bw_raw_bytes = 0
+                        produced_count = 0
+                        produce_ms_total = produce_ms_max = 0.0
+                        stage_totals = [0.0] * 4
+                        clock_drops = backlog_drops = 0
 
                     elapsed = _loop.time() - start_time
                     wait = (frame_index * frame_t) - elapsed
@@ -1077,7 +1228,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
             finally:
                 receive_task.cancel()
-                decoder.release()
+                await asyncio.gather(receive_task, return_exceptions=True)
+                await _loop.run_in_executor(None, decoder.release)
 
             # Video finished → advance queue
             queue_index += 1
@@ -1254,6 +1406,12 @@ if __name__ == "__main__":
     )
     render.add_argument("--cols", type=int, default=None, help="Grid columns (default: 200 for text, 450 for pixel)")
     render.add_argument("--rows", type=int, default=0,   help="Grid rows    (default: auto from video aspect ratio)")
+    render.add_argument("--no-resolution-limit", "--no-limit", action="store_true",
+                        help="Disable auto-resolution performance caps for ASCII and pixel grids (FPS and native allocation checks remain)")
+    render.add_argument("--pixel-codec", choices=["raw", "dct"], default="raw",
+                        help="Pixel transport (default: raw; DCT requires a compatible client)")
+    render.add_argument("--dct-quality", type=int, default=70,
+                        help="DCT quality 1..100 (default: 70; lower is smaller and lossier)")
 
     # ── Playback ──
     playback = parser.add_argument_group('\033[33mPlayback\033[0m')
@@ -1263,6 +1421,8 @@ if __name__ == "__main__":
         help="Volume 0-5  (0=muted, 1=normal, 5=double)"
     )
     playback.add_argument("--loop", action="store_true", default=False, help="Loop the queue infinitely")
+    playback.add_argument("--fps", type=float, default=None,
+                          help="Output FPS ceiling (default: ASCII 30, Rust pixel 60, Python pixel 30; no interpolation)")
     playback.add_argument(
         "--quality",
         choices=["lossless", "high", "balanced", "low"], default="lossless",
@@ -1281,10 +1441,20 @@ if __name__ == "__main__":
     srv = parser.add_argument_group('\033[33mServer\033[0m')
     srv.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1; use 0.0.0.0 to expose on LAN)")
     srv.add_argument("--port", type=int, default=8000, help="Server port (default: 8000)")
-    srv.add_argument("--debug", action="store_true", default=False, help="Enable bandwidth debug logging (RAW vs WIRE)")
+    srv.add_argument("--debug", action="store_true", default=False, help="Log bandwidth, production time, clock lag and client playback metrics")
+    srv.add_argument("--engine", choices=["python", "rust", "auto"], default="python",
+                     help="File decoder and adaptive encoder (default: python; Rust pixel defaults to 60 FPS, ASCII to 30)")
     srv.add_argument("--cache-limit", type=int, default=10240, help="Cache limit in MB for downloaded videos (default: 10240 = 10GB)")
 
     args = parser.parse_args()
+    try:
+        resolve_fps_limit(args.engine, args.pixel, args.fps)
+        validate_profile_quality(args.dct_quality)
+        app.state.engine = get_engine(args.engine)
+        if args.pixel_codec == "dct" and app.state.engine.native and not hasattr(app.state.engine.native, "ProfileEncoder"):
+            raise RuntimeError("Native DCT is unavailable; rebuild rust_core with this checkout")
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
 
     # Automatically switch to a color mode if pixel mode is requested,
     # because the client requires mode > 1 to initialize the Canvas/Binary decoder.
@@ -1314,9 +1484,12 @@ if __name__ == "__main__":
     global_default_cols     = args.cols if args.cols is not None else (450 if args.pixel else 200)
     app.state.cols          = global_default_cols
     app.state.rows          = args.rows
+    app.state.no_resolution_limit = args.no_resolution_limit
+    app.state.fps           = args.fps
+    app.state.pixel_codec   = args.pixel_codec
+    app.state.dct_quality   = args.dct_quality
 
-    # ── High FPS Warning ──
-    high_fps_videos = []
+    # Report normal frame-rate conversion using the same policy as playback.
     for entry in queue:
         if entry.get("is_webcam", False):
             continue  # webcam: no fixed FPS to check
@@ -1327,33 +1500,15 @@ if __name__ == "__main__":
         cap = cv2.VideoCapture(entry['video'])
         if cap.isOpened():
             fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps > 35:  # Consider > 35 as high FPS
-                high_fps_videos.append((entry['video'], fps))
+            fps_limit = resolve_fps_limit(
+                app.state.engine.name,
+                entry.get("pixel", False) and entry["mode"] != 1,
+                args.fps,
+            )
+            if math.isfinite(fps) and fps > fps_limit:
+                _, output_fps = frame_sampling(fps, fps_limit)
+                print(f"[FPS] {entry['video']}: {fps:g} → {output_fps:g} FPS (limit {fps_limit:g})")
         cap.release()
-
-    if high_fps_videos:
-        print("\n\033[1;33m[WARNING] High FPS Source(s) Detected:\033[0m")
-        for vid, fps in high_fps_videos:
-            print(f"  - \033[36m{vid}\033[0m is \033[1;31m{fps:.1f} FPS\033[0m")
-        print("\033[33mASCILINE is optimized for 24-30 FPS cinematic playback.")
-        print("High FPS videos will automatically be decimated to ~30 FPS,")
-        print("but performance may still drop depending on the system's CPU.")
-        print("For optimal performance, we recommend using 30 FPS source videos.\033[0m\n")
-
-        # Skip the blocking prompt when there's no real terminal, or when
-        # running inside Docker (compose TTY often looks interactive but
-        # can't reliably accept the y/n answer in the attached UI).
-        in_docker = os.path.exists("/.dockerenv")
-        if not sys.stdin.isatty() or in_docker:
-            print("\033[33mNon-interactive / Docker — continuing.\033[0m\n")
-        else:
-            while True:
-                choice = input("\033[1mDo you want to continue anyway? (y/n): \033[0m").strip().lower()
-                if choice == 'y':
-                    break
-                elif choice == 'n':
-                    print("Exiting...")
-                    exit(0)
 
     # ── Warm-up Cache ──
     # Force the OS to load the first video into RAM cache before any client connects,
@@ -1402,6 +1557,10 @@ if __name__ == "__main__":
             "log_level": "warning",
             "ws_ping_interval": None,
             "ws_ping_timeout": None,
+            # Rust's 60 FPS raw pixel stream must not be synchronously zlib
+            # compressed again by the WebSocket layer. The adaptive ASCII
+            # codec already compresses its own payloads.
+            "ws_per_message_deflate": app.state.engine.name != "rust" and args.pixel_codec == "raw",
         },
         daemon=True
     )
