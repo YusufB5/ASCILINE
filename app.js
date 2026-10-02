@@ -28,7 +28,20 @@ const seekWrap = document.querySelector('.seek-wrap');
 const seekPreview = document.getElementById('seek-preview');
 const seekPreviewImg = document.getElementById('seek-preview-img');
 const seekPreviewTime = document.getElementById('seek-preview-time');
+const btnCopy = document.getElementById('btn-copy');
+const copyTooltip = document.getElementById('copy-tooltip');
 let scrubMeta = null; // hover sprite layout from /scrub
+let copyFeedbackTimer = null;
+
+function showCopyTooltip(msg) {
+    if (!copyTooltip) return;
+    copyTooltip.textContent = msg;
+    copyTooltip.classList.add('show');
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = setTimeout(() => {
+        copyTooltip.classList.remove('show');
+    }, 1500);
+}
 
 function formatTime(seconds) {
     if (isNaN(seconds) || seconds < 0) return "00:00";
@@ -242,6 +255,12 @@ function connectWebSocket() {
                 frameInterval = 1000 / targetFps;
                 renderMode = parseInt(p[2]);
                 pixelMode = (p.length > 5 && parseInt(p[5]) === 1);
+                if (btnCopy) {
+                    btnCopy.disabled = pixelMode;
+                    btnCopy.title = pixelMode
+                        ? 'Copy text is only available in ASCII modes'
+                        : 'Copy current ASCII frame';
+                }
                 const currentQueueIndex = (p.length > 6) ? parseInt(p[6]) : null;
                 duration = (p.length > 7) ? parseFloat(p[7]) : 0;
                 const startOffset = (p.length > 8) ? parseFloat(p[8]) : 0;
@@ -773,6 +792,61 @@ if (seekBar) {
 
 if (btnBack) btnBack.addEventListener('click', (e) => { e.stopPropagation(); skip(-10); });
 if (btnFwd)  btnFwd.addEventListener('click', (e) => { e.stopPropagation(); skip(10); });
+
+if (btnCopy) {
+    btnCopy.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (pixelMode) return;
+
+        try {
+            const rawText = player.textContent || '';
+            if (!rawText.trim()) {
+                showCopyTooltip('NO FRAME');
+                return;
+            }
+
+            if (!navigator.clipboard) {
+                throw new Error('Clipboard API unavailable (requires secure HTTPS/localhost context)');
+            }
+
+            // 1. Plain text uses untouched LF (\n) to avoid ^M artifacts on Mac/Linux terminals
+            const plainText = rawText;
+
+            // 2. Rich HTML for rich text targets (Google Docs, Word, Notion, email clients)
+            const escaped = rawText
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            const htmlContent = `<pre style="background-color:#050505;color:#ffffff;font-family:'Courier New',Consolas,monospace;font-size:8px;line-height:8px;letter-spacing:0;white-space:pre;margin:0;padding:8px;display:inline-block;">${escaped}</pre>`;
+
+            let copied = false;
+            if (typeof navigator.clipboard.write === 'function' && typeof window.ClipboardItem !== 'undefined') {
+                try {
+                    const textBlob = new Blob([plainText], { type: 'text/plain' });
+                    const htmlBlob = new Blob([htmlContent], { type: 'text/html' });
+                    await navigator.clipboard.write([
+                        new ClipboardItem({
+                            'text/plain': textBlob,
+                            'text/html': htmlBlob
+                        })
+                    ]);
+                    copied = true;
+                } catch (_) {
+                    // Fallback to standard writeText if HTML mime is rejected by browser/OS
+                }
+            }
+
+            if (!copied) {
+                await navigator.clipboard.writeText(plainText);
+            }
+
+            showCopyTooltip('COPIED!');
+        } catch (error) {
+            console.error('Failed to copy ASCII frame:', error);
+            showCopyTooltip('COPY FAILED');
+        }
+    });
+}
 
 if (seekWrap) {
     seekWrap.addEventListener('mousemove', onSeekHover);
