@@ -788,7 +788,40 @@ if (btnCopy) {
         if (pixelMode) return;
 
         try {
-            await navigator.clipboard.writeText(player.textContent);
+            const rawText = player.textContent || '';
+            if (!rawText.trim()) return;
+
+            // 1. Windows Notepad / Plain Text CRLF normalization
+            const plainText = rawText.replace(/\r?\n/g, '\r\n');
+
+            // 2. Rich HTML for editors, Docs, Notion, Word, Discord
+            const escaped = rawText
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            const htmlContent = `<pre style="background-color:#050505;color:#ffffff;font-family:'Courier New',Consolas,monospace;font-size:8px;line-height:8px;letter-spacing:0;white-space:pre;margin:0;padding:8px;display:inline-block;">${escaped}</pre>`;
+
+            let copied = false;
+            if (navigator.clipboard && window.ClipboardItem) {
+                try {
+                    const textBlob = new Blob([plainText], { type: 'text/plain' });
+                    const htmlBlob = new Blob([htmlContent], { type: 'text/html' });
+                    await navigator.clipboard.write([
+                        new ClipboardItem({
+                            'text/plain': textBlob,
+                            'text/html': htmlBlob
+                        })
+                    ]);
+                    copied = true;
+                } catch (_) {
+                    // Fallback to standard writeText if rich format denied
+                }
+            }
+
+            if (!copied) {
+                await navigator.clipboard.writeText(plainText);
+            }
+
             btnCopy.textContent = 'COPIED!';
         } catch (error) {
             console.error('Failed to copy ASCII frame:', error);
