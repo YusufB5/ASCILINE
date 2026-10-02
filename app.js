@@ -29,8 +29,19 @@ const seekPreview = document.getElementById('seek-preview');
 const seekPreviewImg = document.getElementById('seek-preview-img');
 const seekPreviewTime = document.getElementById('seek-preview-time');
 const btnCopy = document.getElementById('btn-copy');
+const copyTooltip = document.getElementById('copy-tooltip');
 let scrubMeta = null; // hover sprite layout from /scrub
 let copyFeedbackTimer = null;
+
+function showCopyTooltip(msg) {
+    if (!copyTooltip) return;
+    copyTooltip.textContent = msg;
+    copyTooltip.classList.add('show');
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = setTimeout(() => {
+        copyTooltip.classList.remove('show');
+    }, 1500);
+}
 
 function formatTime(seconds) {
     if (isNaN(seconds) || seconds < 0) return "00:00";
@@ -789,12 +800,19 @@ if (btnCopy) {
 
         try {
             const rawText = player.textContent || '';
-            if (!rawText.trim()) return;
+            if (!rawText.trim()) {
+                showCopyTooltip('NO FRAME');
+                return;
+            }
 
-            // 1. Windows Notepad / Plain Text CRLF normalization
-            const plainText = rawText.replace(/\r?\n/g, '\r\n');
+            if (!navigator.clipboard) {
+                throw new Error('Clipboard API unavailable (requires secure HTTPS/localhost context)');
+            }
 
-            // 2. Rich HTML for editors, Docs, Notion, Word, Discord
+            // 1. Plain text uses untouched LF (\n) to avoid ^M artifacts on Mac/Linux terminals
+            const plainText = rawText;
+
+            // 2. Rich HTML for rich text targets (Google Docs, Word, Notion, email clients)
             const escaped = rawText
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
@@ -802,7 +820,7 @@ if (btnCopy) {
             const htmlContent = `<pre style="background-color:#050505;color:#ffffff;font-family:'Courier New',Consolas,monospace;font-size:8px;line-height:8px;letter-spacing:0;white-space:pre;margin:0;padding:8px;display:inline-block;">${escaped}</pre>`;
 
             let copied = false;
-            if (navigator.clipboard && window.ClipboardItem) {
+            if (typeof navigator.clipboard.write === 'function' && typeof window.ClipboardItem !== 'undefined') {
                 try {
                     const textBlob = new Blob([plainText], { type: 'text/plain' });
                     const htmlBlob = new Blob([htmlContent], { type: 'text/html' });
@@ -814,7 +832,7 @@ if (btnCopy) {
                     ]);
                     copied = true;
                 } catch (_) {
-                    // Fallback to standard writeText if rich format denied
+                    // Fallback to standard writeText if HTML mime is rejected by browser/OS
                 }
             }
 
@@ -822,14 +840,11 @@ if (btnCopy) {
                 await navigator.clipboard.writeText(plainText);
             }
 
-            btnCopy.textContent = 'COPIED!';
+            showCopyTooltip('COPIED!');
         } catch (error) {
             console.error('Failed to copy ASCII frame:', error);
-            btnCopy.textContent = 'COPY FAILED';
+            showCopyTooltip('COPY FAILED');
         }
-
-        clearTimeout(copyFeedbackTimer);
-        copyFeedbackTimer = setTimeout(() => { btnCopy.textContent = 'COPY'; }, 1500);
     });
 }
 
