@@ -28,7 +28,9 @@ const seekWrap = document.querySelector('.seek-wrap');
 const seekPreview = document.getElementById('seek-preview');
 const seekPreviewImg = document.getElementById('seek-preview-img');
 const seekPreviewTime = document.getElementById('seek-preview-time');
+const btnCopy = document.getElementById('btn-copy');
 let scrubMeta = null; // hover sprite layout from /scrub
+let copyFeedbackTimer = null;
 
 function formatTime(seconds) {
     if (isNaN(seconds) || seconds < 0) return "00:00";
@@ -242,6 +244,12 @@ function connectWebSocket() {
                 frameInterval = 1000 / targetFps;
                 renderMode = parseInt(p[2]);
                 pixelMode = (p.length > 5 && parseInt(p[5]) === 1);
+                if (btnCopy) {
+                    btnCopy.disabled = pixelMode;
+                    btnCopy.title = pixelMode
+                        ? 'Copy text is only available in ASCII modes'
+                        : 'Copy current ASCII frame';
+                }
                 const currentQueueIndex = (p.length > 6) ? parseInt(p[6]) : null;
                 duration = (p.length > 7) ? parseFloat(p[7]) : 0;
                 const startOffset = (p.length > 8) ? parseFloat(p[8]) : 0;
@@ -773,6 +781,24 @@ if (seekBar) {
 
 if (btnBack) btnBack.addEventListener('click', (e) => { e.stopPropagation(); skip(-10); });
 if (btnFwd)  btnFwd.addEventListener('click', (e) => { e.stopPropagation(); skip(10); });
+
+if (btnCopy) {
+    btnCopy.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (pixelMode) return;
+
+        try {
+            await navigator.clipboard.writeText(player.textContent);
+            btnCopy.textContent = 'COPIED!';
+        } catch (error) {
+            console.error('Failed to copy ASCII frame:', error);
+            btnCopy.textContent = 'COPY FAILED';
+        }
+
+        clearTimeout(copyFeedbackTimer);
+        copyFeedbackTimer = setTimeout(() => { btnCopy.textContent = 'COPY'; }, 1500);
+    });
+}
 
 if (seekWrap) {
     seekWrap.addEventListener('mousemove', onSeekHover);
