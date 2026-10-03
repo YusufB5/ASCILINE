@@ -58,6 +58,9 @@ from asciline.engines import get_engine
 from asciline.media_runtime import ffmpeg_executable
 from asciline.playback import resolve_fps_limit, frame_sampling
 from asciline.pixel_profile import PixelProfile, align_profile_grid, validate_profile_quality
+from asciline.perf_trace import PlaybackTrace, new_session_id
+from asciline.source_queue import SourceQueue
+from asciline.commands import PlaybackCommands
 
 # ── FILTER PALETTES ──────────────────────────────────────────────────────────
 # Named character palettes that the client can switch between at runtime.
@@ -162,8 +165,14 @@ async def lifespan(app: FastAPI):
     loop.set_exception_handler(handle_exception)
 
     task = asyncio.create_task(prefetch_worker())
-    yield
-    task.cancel()
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        trace = getattr(app.state, "perf_trace", None)
+        if trace is not None:
+            await asyncio.to_thread(trace.close)
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -648,6 +657,15 @@ async def websocket_endpoint(websocket: WebSocket):
         return
 
     queue_index = 0  # local index; advances through the queue
+    trace = getattr(app.state, "perf_trace", None)
+    trace_session = new_session_id() if trace is not None else None
+    trace_segment = 0
+
+    def record(kind, **fields):
+        if trace is not None:
+            trace.record(kind, session=trace_session, segment=trace_segment, **fields)
+
+    record("connect")
 
     try:
         while True:
@@ -763,6 +781,21 @@ async def websocket_endpoint(websocket: WebSocket):
             skip_n, effective_fps = frame_sampling(source_fps, MAX_FPS)
             frame_t = 1.0 / effective_fps
 
+            def record_stream(reason):
+                record("stream", reason=reason, engine=decoder.engine.name,
+                       codec="dct" if dct_active else ("raw" if pixel_mode else "ascii"),
+                       cols=cols, rows=rows, fps=effective_fps, source_fps=source_fps,
+                       quality=profile_quality if dct_active else None,
+                       queue_index=queue_index, sync=sync_requested,
+                       source=os.path.basename(str(video_path)), source_width=vid_w,
+                       source_height=vid_h, source_frames=decoder.frame_count,
+                       decode_ahead=getattr(app.state, "decode_ahead", 0) if
+                       decoder.engine.name == "rust" and pixel_mode and not is_webcam else 0,
+                       native_version=getattr(decoder.engine.native, "__version__", None))
+
+            trace_segment += 1
+            record_stream("start")
+
             duration = decoder.frame_count / decoder.fps if decoder.fps > 0 else 0
             sync_playback = sync_requested and not is_webcam
             sync_id = 0
@@ -800,7 +833,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # ASCII Color: 4-byte header + [char,R,G,B] per pixel
                 ascii_send_buf = bytearray(4 + rows * cols * 4)
 
-            cmd_queue = asyncio.Queue()
+            cmd_queue = PlaybackCommands()
             is_paused = False
             # Send a small preroll, then wait until this client's clock has
             # actually started. Decode/MP3 startup time must not count as play.
@@ -811,18 +844,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     while True:
                         msg = await websocket.receive_json()
-                        await cmd_queue.put(msg)
+                        removed = cmd_queue.put_nowait(msg)
+                        if removed:
+                            record("seek_coalesced", removed=removed, target=msg.get("time"))
                 except Exception:
-                    await cmd_queue.put({"type": "disconnect"})
+                    cmd_queue.put_nowait({"type": "disconnect"})
             
             receive_task = asyncio.create_task(receive_commands())
 
             needs_frame_skip = False
+            source_queue = None
+
+            def start_source_queue():
+                capacity = getattr(app.state, "decode_ahead", 0)
+                if capacity and decoder.engine.name == "rust" and pixel_mode and not is_webcam:
+                    return SourceQueue(decoder, skip_n, capacity)
+                return None
 
             # ── THREAD-OFFLOADED FRAME PRODUCER ──
-            # Bundles ALL CPU work (decode + process + encode) into one
-            # closure that runs in a thread pool, keeping the asyncio
-            # event loop 100% free for I/O (WebSocket send) and timing.
+            # The serial path decodes and encodes in one executor call.
+            # With decode-ahead, a separate bounded source worker owns reads;
+            # this call takes its next frame and keeps encoding strictly ordered.
             def produce(pf, fi):
                 """Decode, process, encode one frame. Returns None on EOF.
                 pf = prev_frame, fi = frame_index."""
@@ -830,21 +872,30 @@ async def websocket_endpoint(websocket: WebSocket):
                 source_started = time.perf_counter()
                 # Preserve the first frame at startup/seek. Skip only between
                 # output frames, so the decoder's retained seek frame is used.
-                if needs_frame_skip:
-                    for _ in range(skip_n - 1):
-                        if not decoder.grab():
-                            return None
-                try:
-                    gray_frame, bgr_frame = next(decoder)
-                except StopIteration:
-                    return None
+                queue_depth = 0
+                if source_queue is not None:
+                    item = source_queue.take()
+                    if item is None:
+                        return None
+                    gray_frame, bgr_frame, source_work_ms, queue_depth = item
+                else:
+                    if needs_frame_skip:
+                        for _ in range(skip_n - 1):
+                            if not decoder.grab():
+                                return None
+                    try:
+                        gray_frame, bgr_frame = next(decoder)
+                    except StopIteration:
+                        return None
+                    source_work_ms = (time.perf_counter() - source_started) * 1000
                 needs_frame_skip = True
                 source_finished = time.perf_counter()
 
                 def produced(kind, data, previous, raw_size, wire_size):
                     return (kind, data, previous, raw_size, wire_size,
                             (source_finished - source_started) * 1000,
-                            (time.perf_counter() - source_finished) * 1000)
+                            (time.perf_counter() - source_finished) * 1000,
+                            source_work_ms, queue_depth)
 
                 if pixel_mode:
                     raw_sz = 4 + rows * cols * 3
@@ -911,6 +962,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # SENT frame is a correct delta across the gap (deltas are always
             # relative to the last sent frame). Returns False at EOF.
             def advance_one():
+                if source_queue is not None:
+                    return source_queue.take() is not None
                 for _ in range(skip_n):
                     if not decoder.grab():
                         return False
@@ -942,6 +995,9 @@ async def websocket_endpoint(websocket: WebSocket):
             reset_metrics()
 
             try:
+                source_queue = start_source_queue()
+                if source_queue is not None:
+                    print(f"[SOURCE] Decode-ahead: {source_queue.capacity} frames (source timing is queue wait)")
                 while True:
                     while not cmd_queue.empty():
                         msg = cmd_queue.get_nowait()
@@ -949,6 +1005,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             raise WebSocketDisconnect(code=1000)
                         elif msg.get("type") == "pause":
                             is_paused = msg.get("paused", False)
+                            record("pause", paused=bool(is_paused), frame=frame_index)
                             if not is_paused:
                                 start_time = _loop.time() - (frame_index * frame_t)
                                 reset_metrics()
@@ -964,8 +1021,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             start_time = _loop.time() - clock
                             awaiting_ready = False
                             reset_metrics()
+                            record("playback_ready", clock=clock, frame=frame_index)
                         elif msg.get("type") == "seek":
                             target_sec = float(msg.get("time", 0))
+                            record("seek", target=target_sec)
+                            seek_started = time.perf_counter()
+                            if source_queue is not None:
+                                await _loop.run_in_executor(None, source_queue.close)
+                                source_queue = None
                             await _loop.run_in_executor(None, decoder.seek, target_sec)
                             needs_frame_skip = False
                             if profile_encoder is not None:
@@ -977,6 +1040,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             client_backlog = 0  # stale across a seek
                             consec_high_reports = 0
                             consec_drops = 0
+                            trace_segment += 1
+                            record_stream("seek")
+                            record("seeked", target=target_sec, actual=frame_index * frame_t,
+                                   seek_ms=(time.perf_counter() - seek_started) * 1000,
+                                   paused=bool(is_paused))
+                            source_queue = start_source_queue()
                             if sync_playback:
                                 sync_id = msg.get("requestId", sync_id + 1)
                                 awaiting_ready = True
@@ -1003,7 +1072,20 @@ async def websocket_endpoint(websocket: WebSocket):
                                 if isinstance(value := msg.get(key), (int, float))
                                 and math.isfinite(value) and 0 <= value <= 1e9
                             }
+                            if trace is not None:
+                                details = {
+                                    key: float(value) for key in
+                                    ("decoded", "rendered", "renderBuffer", "clock", "displayTime")
+                                    if isinstance(value := msg.get(key), (int, float))
+                                    and math.isfinite(value) and 0 <= value <= 1e9
+                                }
+                                record("client", depth=client_backlog, **client_perf, **details,
+                                       current_epoch=not sync_playback or msg.get("requestId") == sync_id,
+                                       hidden=bool(msg.get("hidden", False)))
                         elif msg.get("type") == "reinit":
+                            if source_queue is not None:
+                                await _loop.run_in_executor(None, source_queue.close)
+                                source_queue = None
                             # Soft reload: Toggle pixel mode and send new INIT
                             pixel_mode = bool(msg.get("pixel", pixel_mode))
                             dct_active = profile_enabled and profile_capable and pixel_mode and not is_webcam
@@ -1049,6 +1131,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             client_backlog = 0
                             consec_high_reports = 0
                             consec_drops = 0
+                            trace_segment += 1
+                            record_stream("reinit")
+                            source_queue = start_source_queue()
                             if sync_playback:
                                 sync_id += 1
                                 awaiting_ready = True
@@ -1145,7 +1230,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     shed_backlog = (not awaiting_ready and consec_high_reports >= 2
                                     and consec_drops < MAX_CONSEC_DROPS)
                     if behind_clock or shed_backlog:
+                        skip_started = time.perf_counter()
                         advanced = await _loop.run_in_executor(None, advance_one)
+                        record("skip", frame=frame_index, pts=frame_index * frame_t,
+                               reason="clock" if behind_clock else "backlog", advanced=advanced,
+                               source_advance_ms=(time.perf_counter() - skip_started) * 1000)
                         if not advanced:
                             break
                         if behind_clock:
@@ -1174,9 +1263,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         await asyncio.sleep(0.01)
 
                     if result is None:
+                        record("eof", frame=frame_index)
                         break
 
-                    send_type, data, prev_frame, raw_size, wire_size, source_ms, encode_ms = result
+                    (send_type, data, prev_frame, raw_size, wire_size, source_ms,
+                     encode_ms, source_work_ms, source_depth) = result
 
                     send_started = time.perf_counter()
                     if send_type == 'text':
@@ -1184,6 +1275,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     else:
                         await websocket.send_bytes(data)
                     send_ms = (time.perf_counter() - send_started) * 1000
+                    if trace is not None:
+                        record("frame", frame=frame_index, pts=frame_index * frame_t,
+                               preroll=awaiting_ready, source_ms=source_ms, encode_ms=encode_ms,
+                               handoff_ms=max(0, produce_ms - source_ms - encode_ms),
+                               produce_ms=produce_ms, send_ms=send_ms, wire_bytes=wire_size,
+                               source_work_ms=source_work_ms, source_queue_depth=source_depth,
+                               send_lag_ms=None if awaiting_ready else
+                               (_loop.time() - start_time - frame_index * frame_t) * 1000)
                     if awaiting_ready:
                         prefill_remaining -= 1
 
@@ -1229,6 +1328,8 @@ async def websocket_endpoint(websocket: WebSocket):
             finally:
                 receive_task.cancel()
                 await asyncio.gather(receive_task, return_exceptions=True)
+                if source_queue is not None:
+                    await _loop.run_in_executor(None, source_queue.close)
                 await _loop.run_in_executor(None, decoder.release)
 
             # Video finished → advance queue
@@ -1251,6 +1352,8 @@ async def websocket_endpoint(websocket: WebSocket):
         # a close frame is written concurrently with a pending drain waiter.
         # This is a harmless race condition on disconnect — safe to swallow.
         pass
+    finally:
+        record("disconnect")
 
 
 import logo
@@ -1331,6 +1434,8 @@ def command_loop():
                 print_status()
             elif cmd in ('/quit', 'quit', 'exit'):
                 print("\n \033[33m[X] Shutting down ASCILINE...\033[0m\n")
+                if getattr(app.state, "perf_trace", None) is not None:
+                    app.state.perf_trace.close()
                 os._exit(0)
             elif cmd:
                 print(f" \033[90mUnknown command: '{cmd}'. Type \033[36m/help\033[90m for options.\033[0m")
@@ -1339,6 +1444,8 @@ def command_loop():
             threading.Event().wait()
         except KeyboardInterrupt:
             print("\n \033[33m[X] Shutting down ASCILINE...\033[0m\n")
+            if getattr(app.state, "perf_trace", None) is not None:
+                app.state.perf_trace.close()
             os._exit(0)
 
 
@@ -1442,6 +1549,10 @@ if __name__ == "__main__":
     srv.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1; use 0.0.0.0 to expose on LAN)")
     srv.add_argument("--port", type=int, default=8000, help="Server port (default: 8000)")
     srv.add_argument("--debug", action="store_true", default=False, help="Log bandwidth, production time, clock lag and client playback metrics")
+    srv.add_argument("--perf-record", metavar="DIR",
+                     help="Record per-frame stage timings and playback events to a new JSONL file in DIR")
+    srv.add_argument("--decode-ahead", type=int, choices=[0, 2, 3], default=0,
+                     help="Experimental bounded source queue for Rust pixel playback (default: 0/off)")
     srv.add_argument("--engine", choices=["python", "rust", "auto"], default="python",
                      help="File decoder and adaptive encoder (default: python; Rust pixel defaults to 60 FPS, ASCII to 30)")
     srv.add_argument("--cache-limit", type=int, default=10240, help="Cache limit in MB for downloaded videos (default: 10240 = 10GB)")
@@ -1479,6 +1590,14 @@ if __name__ == "__main__":
     app.state.tolerance     = {"lossless": 0, "high": 4, "balanced": 8, "low": 16}[args.quality]
 
     app.state.debug         = args.debug
+    app.state.decode_ahead  = args.decode_ahead
+    app.state.perf_trace    = None
+    if args.perf_record:
+        try:
+            app.state.perf_trace = PlaybackTrace(args.perf_record)
+        except OSError as exc:
+            parser.error(f"Could not open performance recording: {exc}")
+        print(f"[RECORD] {app.state.perf_trace.path.resolve()}", flush=True)
     app.state.thumbnails    = not args.no_thumbnails
     app.state.cache_limit   = args.cache_limit * 1024**2
     global_default_cols     = args.cols if args.cols is not None else (450 if args.pixel else 200)

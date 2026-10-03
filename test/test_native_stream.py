@@ -46,6 +46,7 @@ def live_server(tmp_path_factory, request):
         port = sock.getsockname()[1]
     log = (folder / "server.log").open("w", encoding="utf-8")
     render_args = getattr(request, "param", ["--pixel", "--cols", "160", "--rows", "90"])
+    render_args = [str(folder / "trace") if arg == "{trace_dir}" else arg for arg in render_args]
     process = subprocess.Popen([sys.executable, "-u", "stream_server.py", str(clip),
         "--engine", "rust", *render_args,
         "--vol", "1", "--no-thumbnails", "--port", str(port)], cwd=ROOT,

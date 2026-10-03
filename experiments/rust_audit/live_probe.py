@@ -90,8 +90,10 @@ def own_server(args):
         process = subprocess.Popen([*launch, args.serve_video,
             "--engine", "rust", "--pixel", "--pixel-codec", "dct" if args.dct else "raw",
             "--cols", str(args.cols), "--fps", str(args.fps), "--debug",
-            "--no-thumbnails", "--port", str(port)], cwd=root,
-            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+            "--decode-ahead", str(args.decode_ahead),
+            "--no-thumbnails", "--port", str(port),
+            *(["--perf-record", str(args.perf_record)] if args.perf_record else [])], cwd=root,
+            stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 30
             while True:
@@ -104,9 +106,8 @@ def own_server(args):
                     time.sleep(.05)
             yield port
         finally:
-            process.terminate()
             try:
-                process.wait(timeout=5)
+                process.communicate(input=b"/quit\n", timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
@@ -122,12 +123,16 @@ if __name__ == "__main__":
     parser.add_argument("--serve-video", help="Start an isolated server for this local video")
     parser.add_argument("--cols", type=int, default=450)
     parser.add_argument("--fps", type=float, default=60)
+    parser.add_argument("--decode-ahead", type=int, choices=[0, 2, 3], default=0)
     parser.add_argument("--native-binary", type=Path, help="Use a saved DLL in the isolated server for A/B measurements")
     parser.add_argument("--label", help="Alphanumeric label for separate A/B log files")
+    parser.add_argument("--perf-record", type=Path, help="Record per-frame diagnostics from the owned server")
     args = parser.parse_args()
     if args.label and not args.label.replace("-", "").isalnum():
         parser.error("--label must contain only letters, digits and hyphens")
     if args.native_binary and not args.serve_video:
         parser.error("--native-binary requires --serve-video")
+    if args.perf_record and not args.serve_video:
+        parser.error("--perf-record requires --serve-video")
     with own_server(args) as port:
         asyncio.run(probe(port, None if args.no_deflate else "deflate", args.seconds, args.dct))

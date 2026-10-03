@@ -313,6 +313,13 @@ async function testLateFramesAndClientTimingReports() {
     assert.equal(report.lateDrops, 3);
     assert.equal(report.decodeErrors, 0);
     assert.equal(report.lagMs, 950);
+    assert.equal(report.requestId, 0);
+    assert.equal(report.decoded, 4);
+    assert.equal(report.rendered, 1);
+    assert.equal(report.renderBuffer, 0);
+    assert.equal(report.clock, 1);
+    assert.equal(report.displayTime, 0);
+    assert.equal(report.hidden, false);
     // A source-frame jump can restore rendering without resetting the audio clock.
     h.frame(60); await flush();
     h.decodes.at(-1).resolve({ frameIndex: 60, frame: new Uint8Array(6).fill(99) });
@@ -322,6 +329,7 @@ async function testLateFramesAndClientTimingReports() {
     h.run('doSeek(2)');
     assert.equal(h.run('playbackMetrics.lateDrops'), 0);
     assert.equal(h.run('playbackMetrics.decoded'), 0);
+    assert.equal(h.run('playbackMetrics.displayTime ?? null'), null);
 }
 
 if (require.main === module) (async () => {

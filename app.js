@@ -605,6 +605,7 @@ function renderFrame(now) {
     }
     playbackMetrics.renderMs += performance.now() - renderStarted;
     playbackMetrics.rendered++;
+    playbackMetrics.displayTime = frameObj.time;
 }
 
 // ═══════════════════════════════════════
@@ -636,6 +637,13 @@ function startBufferReports() {
                     : Math.max(0, (getMasterClock() - playbackMetrics.latestTime) * 1000),
                 lateDrops: playbackMetrics.lateDrops,
                 decodeErrors: playbackMetrics.decodeErrors,
+                requestId: syncId,
+                decoded: playbackMetrics.decoded,
+                rendered: playbackMetrics.rendered,
+                renderBuffer: frameBuffer.length,
+                clock: getMasterClock(),
+                displayTime: playbackMetrics.displayTime ?? null,
+                hidden: document.hidden === true,
             }));
         }
     }, 250);

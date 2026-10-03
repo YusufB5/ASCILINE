@@ -16,7 +16,8 @@ from codec import ProfileEncoder
 DCT_ARGS = ["--pixel", "--cols", "160", "--rows", "90", "--pixel-codec", "dct"]
 
 
-@pytest.mark.parametrize("live_server", [[*DCT_ARGS, "--fps", str(fps)] for fps in (30, 60)], indirect=True)
+@pytest.mark.parametrize("live_server", [[*DCT_ARGS, "--fps", str(fps), "--decode-ahead", str(ahead)]
+                                       for fps in (30, 60) for ahead in (0, 3)], indirect=True)
 def test_late_producer_catches_clock_without_breaking_dct(live_server, tmp_path):
     """A healthy decoder queue must not hide an overdue server timeline."""
     port, engine, clip = live_server
@@ -61,7 +62,7 @@ def test_late_producer_catches_clock_without_breaking_dct(live_server, tmp_path)
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("live_server", [DCT_ARGS], indirect=True)
+@pytest.mark.parametrize("live_server", [DCT_ARGS, [*DCT_ARGS, "--decode-ahead", "3"]], indirect=True)
 def test_live_profile_seek_modes_reconnect_and_browser_truth(live_server, tmp_path):
     port, engine, clip = live_server
     sequences = []
