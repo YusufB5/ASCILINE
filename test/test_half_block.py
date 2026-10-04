@@ -159,7 +159,7 @@ class TerminalRendererHalfBlockTest(unittest.TestCase):
         self.assertEqual(half._decoder._size, (cols, rows * 2))
 
     def test_play_writes_half_block_frames(self):
-        renderer = self._renderer(cols=100, half_block=True)
+        renderer = self._renderer(cols=100, half_block=True, tolerance=-1)
         cols, pixel_rows = renderer._decoder._size
         out = io.StringIO()
         with patch("ascii_video_player2.time.sleep"), redirect_stdout(out):
@@ -167,6 +167,45 @@ class TerminalRendererHalfBlockTest(unittest.TestCase):
         text = out.getvalue()
         self.assertEqual(text.count("\u2580"), 3 * cols * pixel_rows // 2)
         self.assertIn("\033[48;2;", text)
+
+    def test_diff_mode_never_writes_more_than_full_frames(self):
+        renderer = self._renderer(cols=100, half_block=True)
+        cols, pixel_rows = renderer._decoder._size
+        out = io.StringIO()
+        with patch("ascii_video_player2.time.sleep"), redirect_stdout(out):
+            renderer.play()
+        self.assertLessEqual(out.getvalue().count("\u2580"), 3 * cols * pixel_rows // 2)
+
+
+class HalfBlockDiffTest(unittest.TestCase):
+    def _frame(self, value=100):
+        return np.full((4, 6, 3), value, dtype=np.uint8)
+
+    def test_first_call_draws_everything_with_absolute_positions(self):
+        out = HalfBlockMapper().convert_diff(self._frame(), pad_x=3, pad_y=2)
+        self.assertEqual(out.count("▀"), 2 * 6)
+        self.assertIn("\033[3;4H", out)   # row 0 -> line 3, col 0 -> column 4
+        self.assertIn("\033[4;4H", out)
+
+    def test_unchanged_frame_writes_nothing(self):
+        mapper = HalfBlockMapper()
+        mapper.convert_diff(self._frame())
+        self.assertEqual(mapper.convert_diff(self._frame()), "")
+
+    def test_change_within_tolerance_is_ignored_beyond_it_is_drawn(self):
+        mapper = HalfBlockMapper()
+        mapper.convert_diff(self._frame(100), tolerance=8)
+        self.assertEqual(mapper.convert_diff(self._frame(105), tolerance=8), "")
+        self.assertNotEqual(mapper.convert_diff(self._frame(120), tolerance=8), "")
+
+    def test_only_the_changed_cell_is_redrawn(self):
+        mapper = HalfBlockMapper()
+        mapper.convert_diff(self._frame())
+        frame = self._frame()
+        frame[0, 2] = (0, 0, 255)         # one top pixel -> cell (0, 2)
+        out = mapper.convert_diff(frame, tolerance=4)
+        self.assertEqual(out.count("▀"), 1)
+        self.assertIn("\033[1;3H", out)
 
 
 class LegacyEncodingTest(unittest.TestCase):

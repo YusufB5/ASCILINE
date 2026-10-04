@@ -280,6 +280,67 @@ class HalfBlockMapper:
             "".join(row) + self._RESET for row in cells.tolist()
         )
 
+    def convert_diff(self, bgr: np.ndarray, pad_x: int = 0, pad_y: int = 0,
+                     tolerance: int = 0) -> str:
+        """
+        Differential frame: redraw only the cells that visibly changed.
+
+        A cell is redrawn when its top or bottom colour moved by more than
+        ``tolerance`` (per channel, 0-255) from what is *currently on screen*.
+        The reference is the displayed colour, not the previous source frame,
+        so slow drifts still accumulate and eventually update.
+
+        Every span is positioned with an absolute cursor move (CUP), so no row
+        depends on the previous one and nothing can shear left/right.
+        The first call (or a size change) draws the whole frame.
+
+        :param pad_x: columns of centring offset.
+        :param pad_y: rows of centring offset.
+        :return:      escape string ready to write ('' if nothing changed).
+        """
+        if bgr.shape[0] % 2:
+            bgr = np.concatenate([bgr, np.zeros_like(bgr[:1])])
+        rgb = bgr[:, :, ::-1]
+        if self._qb > 0:
+            rgb = (rgb >> self._qb) << self._qb
+
+        top, bottom = rgb[0::2], rgb[1::2]
+        shown = getattr(self, "_shown", None)
+
+        if shown is None or shown[0].shape != top.shape:
+            self._shown = (top.copy(), bottom.copy())
+            changed = np.ones(top.shape[:2], dtype=bool)
+        else:
+            st, sb = shown
+            dt = np.abs(top.astype(np.int16) - st).max(axis=2)
+            db = np.abs(bottom.astype(np.int16) - sb).max(axis=2)
+            changed = (dt > tolerance) | (db > tolerance)
+            if not changed.any():
+                return ""
+            # Update only what we are redrawing; the rest keeps its old colour.
+            st[changed] = top[changed]
+            sb[changed] = bottom[changed]
+
+        st, sb = self._shown
+        fg = self._escapes(st, "\033[38;2;")
+        bg = self._escapes(sb, "\033[48;2;")
+        rep_fg = np.zeros(st.shape[:2], dtype=bool)
+        rep_bg = np.zeros(st.shape[:2], dtype=bool)
+        rep_fg[:, 1:] = np.all(st[:, 1:] == st[:, :-1], axis=2)
+        rep_bg[:, 1:] = np.all(sb[:, 1:] == sb[:, :-1], axis=2)
+
+        out = []
+        for r in np.flatnonzero(changed.any(axis=1)).tolist():
+            cols = np.flatnonzero(changed[r])
+            a, b = int(cols[0]), int(cols[-1]) + 1
+            f = np.where(rep_fg[r, a:b], "", fg[r, a:b])
+            g = np.where(rep_bg[r, a:b], "", bg[r, a:b])
+            f[0], g[0] = fg[r, a], bg[r, a]      # a span restates both colours
+            out.append(f"\033[{pad_y + r + 1};{pad_x + a + 1}H")
+            out.append("".join(np.char.add(np.char.add(f, g), self._GLYPH).tolist()))
+        out.append(self._RESET)
+        return "".join(out)
+
     @classmethod
     def _escapes(cls, px: np.ndarray, lead: str) -> np.ndarray:
         """
@@ -310,6 +371,8 @@ class TerminalRenderer:
     """
 
     _CURSOR_HOME   = "\033[H"
+    _SYNC_BEGIN    = "\033[?2026h"  # synchronized output: begin atomic frame
+    _SYNC_END      = "\033[?2026l"  # synchronized output: present frame
     _HIDE_CURSOR   = "\033[?25l"
     _SHOW_CURSOR   = "\033[?25h"
     _DISABLE_WRAP  = "\033[?7l"    # prevent line wrapping
@@ -329,6 +392,7 @@ class TerminalRenderer:
         fallback_fps : float = 0,
         mirror       : bool = False,
         half_block   : bool = False,
+        tolerance    : int = 6,
     ) -> None:
         """
         :param path:          Path to video file or webcam index
@@ -338,6 +402,8 @@ class TerminalRenderer:
         :param fallback_fps:  Fallback FPS if source FPS is unknown.
         :param mirror:        If True, flip each frame horizontally (for webcams).
         :param half_block:    If True, render two pixels per cell with ▀ (palette is ignored).
+        :param tolerance:     Half-block only: redraw a cell only when a colour channel
+                              moved by more than this (0 = every change, <0 = full frames).
         """
         # ── Video metadata ────────────────────────────────────────────
         # Initialize decoder once with dummy dimensions to get source resolution
@@ -404,6 +470,8 @@ class TerminalRenderer:
         self._decoder._size = (cols, pixel_rows)  # update target size after calculation
         self._mapper        = HalfBlockMapper(quantize_bits) if half_block \
                               else AsciiMapper(palette, quantize_bits)
+        self._diff          = half_block and tolerance >= 0
+        self._tolerance     = max(0, tolerance)
         self._fps           = src_fps
         self._frame_t       = 1.0 / self._fps
 
@@ -412,26 +480,55 @@ class TerminalRenderer:
         stdout = sys.stdout
 
         stdout.write(self._DISABLE_WRAP + self._HIDE_CURSOR + self._BLACK_BG)
+        if self._diff:
+            stdout.write(self._CLEAR_SCREEN)  # diff frames never repaint the margins
         stdout.flush()
+
+        # Wall-clock schedule: frame N is due at start + N * frame_t. When
+        # decode + mapping + the terminal write cannot keep up (maximised
+        # window), frames are dropped to stay in real time instead of the
+        # video sliding into slow motion.
+        can_drop = not self._decoder._is_webcam
+        start    = time.perf_counter()
+        index    = 0
 
         try:
             for gray_frame, bgr_frame in self._decoder:
-                t0 = time.perf_counter()
+                if self._diff:
+                    # Only changed cells, absolutely positioned (no shearing).
+                    ascii_frame = self._mapper.convert_diff(
+                        bgr_frame, len(self._pad_x), self._pad_y, self._tolerance)
+                    prefix = ""
+                else:
+                    ascii_frame = self._mapper.convert(gray_frame, bgr_frame)
 
-                ascii_frame = self._mapper.convert(gray_frame, bgr_frame)
-                
-                # Apply padding for centering
-                if self._pad_x:
-                    ascii_frame = self._pad_x + ascii_frame.replace('\n', '\n' + self._pad_x)
-                if self._pad_y > 0:
-                    ascii_frame = ('\n' * self._pad_y) + ascii_frame
+                    # Apply padding for centering
+                    if self._pad_x:
+                        ascii_frame = self._pad_x + ascii_frame.replace('\n', '\n' + self._pad_x)
+                    if self._pad_y > 0:
+                        ascii_frame = ('\n' * self._pad_y) + ascii_frame
+                    prefix = self._CURSOR_HOME
 
-                stdout.write(self._CURSOR_HOME + ascii_frame)
-                stdout.flush()
+                # Synchronized output (DEC 2026): the terminal presents the
+                # frame atomically, so a slow redraw no longer shows torn,
+                # vertically stretched bands. Unsupported terminals ignore it.
+                if ascii_frame:
+                    stdout.write(self._SYNC_BEGIN + prefix + ascii_frame
+                                 + self._SYNC_END)
+                    stdout.flush()
 
-                wait = self._frame_t - (time.perf_counter() - t0)
+                index += 1
+                due  = start + index * self._frame_t
+                wait = due - time.perf_counter()
                 if wait > 0:
                     time.sleep(wait)
+                elif can_drop:
+                    # Behind schedule: skip as many frames as we are late.
+                    late = int(-wait / self._frame_t)
+                    for _ in range(late):
+                        if not self._decoder.grab():
+                            break
+                        index += 1
 
         except KeyboardInterrupt:
             pass
@@ -461,6 +558,9 @@ if __name__ == "__main__":
         help="Fixed grid width. If 0, auto-fits to terminal (default: 0)")
     parser.add_argument("--half-block", action="store_true", default=False,
         help="Render two pixels per cell with \u2580 (doubles vertical resolution)")
+    parser.add_argument("--tolerance", type=int, default=6,
+        help="Half-block: redraw only cells whose colour changed by more than this "
+             "(0-255, default: 6; 0 = every change, -1 = redraw full frames)")
     parser.add_argument("--webcam", action="store_true", default=False,
         help="Use webcam instead of a video file")
     parser.add_argument("--webcam-device", type=int, default=0,
@@ -491,6 +591,7 @@ if __name__ == "__main__":
             fallback_fps  = args.webcam_fps if args.webcam else 0,
             mirror        = mirror,
             half_block    = args.half_block,
+            tolerance     = args.tolerance,
         )
         renderer.play()
     except FileNotFoundError as e:
