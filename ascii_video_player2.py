@@ -403,7 +403,7 @@ class TerminalRenderer:
         :param mirror:        If True, flip each frame horizontally (for webcams).
         :param half_block:    If True, render two pixels per cell with ▀ (palette is ignored).
         :param tolerance:     Half-block only: redraw a cell only when a colour channel
-                              moved by more than this (0 = every change, <0 = full frames).
+                              moved by more than this (0 = every change).
         """
         # ── Video metadata ────────────────────────────────────────────
         # Initialize decoder once with dummy dimensions to get source resolution
@@ -470,7 +470,7 @@ class TerminalRenderer:
         self._decoder._size = (cols, pixel_rows)  # update target size after calculation
         self._mapper        = HalfBlockMapper(quantize_bits) if half_block \
                               else AsciiMapper(palette, quantize_bits)
-        self._diff          = half_block and tolerance >= 0
+        self._diff          = half_block
         self._tolerance     = max(0, tolerance)
         self._fps           = src_fps
         self._frame_t       = 1.0 / self._fps
@@ -560,7 +560,7 @@ if __name__ == "__main__":
         help="Render two pixels per cell with \u2580 (doubles vertical resolution)")
     parser.add_argument("--tolerance", type=int, default=6,
         help="Half-block: redraw only cells whose colour changed by more than this "
-             "(0-255, default: 6; 0 = every change, -1 = redraw full frames)")
+             "(0-255, default: 6; 0 = redraw every change, lossless)")
     parser.add_argument("--webcam", action="store_true", default=False,
         help="Use webcam instead of a video file")
     parser.add_argument("--webcam-device", type=int, default=0,
@@ -573,6 +573,8 @@ if __name__ == "__main__":
 
     if not args.webcam and args.video is None:
         parser.error("a video file is required (or use --webcam)")
+    if not 0 <= args.tolerance <= 255:
+        parser.error("--tolerance must be between 0 and 255")
     if args.half_block and args.palette:
         parser.error("--palette has no effect with --half-block")
 

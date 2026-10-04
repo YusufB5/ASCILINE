@@ -159,22 +159,16 @@ class TerminalRendererHalfBlockTest(unittest.TestCase):
         self.assertEqual(half._decoder._size, (cols, rows * 2))
 
     def test_play_writes_half_block_frames(self):
-        renderer = self._renderer(cols=100, half_block=True, tolerance=-1)
-        cols, pixel_rows = renderer._decoder._size
-        out = io.StringIO()
-        with patch("ascii_video_player2.time.sleep"), redirect_stdout(out):
-            renderer.play()
-        text = out.getvalue()
-        self.assertEqual(text.count("\u2580"), 3 * cols * pixel_rows // 2)
-        self.assertIn("\033[48;2;", text)
-
-    def test_diff_mode_never_writes_more_than_full_frames(self):
         renderer = self._renderer(cols=100, half_block=True)
         cols, pixel_rows = renderer._decoder._size
         out = io.StringIO()
         with patch("ascii_video_player2.time.sleep"), redirect_stdout(out):
             renderer.play()
-        self.assertLessEqual(out.getvalue().count("\u2580"), 3 * cols * pixel_rows // 2)
+        text = out.getvalue()
+        # The first frame is drawn in full; later ones only redraw changes.
+        self.assertGreaterEqual(text.count("\u2580"), cols * pixel_rows // 2)
+        self.assertLessEqual(text.count("\u2580"), 3 * cols * pixel_rows // 2)
+        self.assertIn("\033[48;2;", text)
 
 
 class HalfBlockDiffTest(unittest.TestCase):
