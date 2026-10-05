@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCILINE SDK live player</title>
+<style>
+body{margin:2rem auto;padding:0 1rem;max-width:960px;background:#101115;color:#eee;font:16px system-ui}
+.screen{position:relative;width:100%;aspect-ratio:16/9;background:#000}
+button,input{margin:.5rem .3rem .5rem 0}button{padding:.6rem 1rem;cursor:pointer}
+#seek{width:60%}output{font-variant-numeric:tabular-nums}a{color:#7ee}
+</style>
+<h1>ASCILINE SDK live player</h1>
+<p>This page uses the packaged SDK with the current server. The server selects Python or Rust and RAW or DCT.</p>
+<div class="screen"><canvas id="video"></canvas></div>
+<div><button id="play">Play / pause</button><button id="back">−10 s</button><button id="forward">+10 s</button><button id="unmute">Enable audio</button><button id="destroy">Disconnect</button></div>
+<label>Position <input id="seek" type="range" min="0" max="60" step="0.1" value="0"></label><output id="time">0.0 s</output>
+<p id="status">Ready</p>
+<script type="module">
+import { AsciiPlayer } from '../src/asciline-player.js';
+const $=id=>document.getElementById(id);
+let player;
+function create(){
+ player=new AsciiPlayer('#video',{selectionLayer:false,playOverlay:false,clickToPlayPause:false});
+ player.on('init', info=>{$('seek').max=info.duration;$('status').textContent=`${info.cols}×${info.rows} · ${info.pixelCodec} · target ${info.fps.toFixed(2)} FPS`;});
+ player.on('fps', info=>{$('status').textContent=`${info.fps} / ${info.targetFps.toFixed(2)} FPS · buffer ${info.buffered}`;});
+ player.on('timeupdate',time=>{$('time').textContent=`${time.toFixed(1)} s`;if(document.activeElement!==$('seek'))$('seek').value=time;});
+ player.on('error',error=>{$('status').textContent=String(error);});
+ player.on('ended',()=>{$('status').textContent='Finished';});
+}
+create();
+$('play').onclick=()=>{if(!player)create();player.togglePlay();};
+$('back').onclick=()=>player?.skip(-10);
+$('forward').onclick=()=>player?.skip(10);
+$('seek').onchange=()=>player?.seek(Number($('seek').value));
+$('unmute').onclick=()=>player?.unmute();
+$('destroy').onclick=()=>{player?.destroy();player=null;$('status').textContent='Disconnected';};
+window.addEventListener('pagehide',()=>player?.destroy());
+</script>
+</html>
