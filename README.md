@@ -34,7 +34,7 @@
 - [Technical Features](#technical-features)
 - [Architecture](#architecture)
 - [Adaptive Frame Codec (opt-in, ASCII modes 2-6)](#adaptive-frame-codec-opt-in-ascii-modes-2-6)
-- [Standalone Static Web Player](#standalone-static-web-player)
+- [Zero-Dependency Static Web Player](#zero-dependency-static-web-player)
 - [JavaScript SDK (asciline-player)](#javascript-sdk-asciline-player)
 - [Installation](#installation)
 - [Running with Docker](#running-with-docker)
@@ -49,35 +49,27 @@
 
 ## Design Goals
 
-1. **Programmable representation:** expose characters, colors and cells for fonts, palettes, selection layers, effects and experimental interfaces.
-2. **Choose detail and cost:** grid size, color depth and transport trade appearance, payload and processing cost. ASCII and pixel have different rendering costs.
-3. **Multiple delivery paths:** live server, SDK, terminal and static ASCF provide different ways to use the representation.
-
-ASCILINE's purpose is this representation and the control it enables. Rust and
-DCT support that purpose; comparisons quantify costs rather than making standard
-codec replacement the goal. Live video draws through Canvas. Source media still
-needs server decoding, pixel DCT is reconstructed in JavaScript, and audio remains
-subject to browser playback policy. Hardware use and performance depend on grid,
-content, browser and machine.
+1. **Pure typographic manipulation**: the visual stream is raw HTML/Canvas text, not a standard media file. That means real-time CSS filters (glows, shadows, animations) can be applied directly to what would otherwise be a video.
+2. **Zero GPU, ultra-low bandwidth (ASCII modes)**: standard codecs (H.264/VP9) need dedicated hardware decoders, which chokes microcontrollers and weak devices. ASCILINE does the heavy lifting server-side and streams lightweight text frames — fewer columns means proportionally less bandwidth. This makes fluid playback possible on constrained networks and zero-GPU devices (smart appliances, retro terminals, basic microcontrollers).
+3. **Works everywhere**: no `<video>` tag, no browser-side codec decoding, no autoplay restrictions. To the browser, it's just text on a canvas.
 
 > **Roadmap idea, not implemented yet:** because ASCII output is already a compact, structured text representation, it could in principle serve as a lightweight input for downstream text/LLM processing instead of feeding raw pixel streams to a vision model. Nothing in the current codebase does this — flagging it here as a direction, not a shipped feature.
 
 ## Technical Features
 
-- **Python playback paths** for Windows, macOS and Linux; current Rust integration is verified on Windows.
-- **Real-time ASCII and pixel streaming**: characters/color cells for typography and BGR grids for direct ImageData drawing.
-- **Configurable FPS ceilings**: ASCII 30, Python pixel 30, Rust pixel 60 by default; higher-rate sources are sampled, without interpolation.
-- **Synchronized startup and seek**: audio clock when available, wall-clock fallback otherwise, with timeline markers and predictor resets.
-- **Custom transport**: raw BGR, adaptive ASCII RAW/ZLIB/DELTA/RLE, and opt-in lossy pixel DCT shared by Python/Rust and local SDK.
-- **Optional Rust acceleration**: FFmpeg source decoding, character mapping and native encoding. A bounded decode-ahead queue can overlap source work with ordered encoding.
+- **Cross-platform**: Windows, macOS, Linux.
+- **Real-time ASCII and pixel streaming**: low-latency video-to-text conversion; pixel mode replaces characters with colored blocks, approaching 360p quality.
+- **HTML5 Canvas rendering**, tuned for 24–30 FPS playback. Higher-FPS sources are automatically decimated for stability.
+- **Master clock sync**: the audio track is the absolute time reference, keeping A/V synchronized.
+- **Low-overhead binary protocol**: frames are streamed as raw `Uint8Array` straight to the canvas.
 - **Multiple color modes**: from black & white up to 16M-color high fidelity.
 - **Flexible video management**: JSON playlists (per-video mode & volume), folder-based auto-queuing, single-file mode, infinite loop — all via CLI flags.
 
 ## Architecture
 
-1. **Backend:** Python/FastAPI owns sessions and endpoints; Python/OpenCV or optional Rust/FFmpeg supplies source decode and encoding.
-2. **Clients:** root demo and JavaScript SDK reconstruct ordered packets and draw text/pixels on Canvas.
-3. **Sync:** INIT negotiates settings; capable clients use preroll, playback-ready and matching seek markers. Live DCT is capability-negotiated.
+1. **Backend (Python/FastAPI)**: decodes video via OpenCV, maps pixels to ASCII via NumPy, streams binary frames.
+2. **Frontend (vanilla JS)**: receives binary frames over WebSocket, manages a jitter buffer, renders to a canvas grid.
+3. **Communication**: a custom `INIT` handshake negotiates resolution/FPS, followed by the binary frame stream.
 
 ASCILINE uses a modular architecture that separates the core rendering engine from its delivery methods.
 
@@ -104,11 +96,7 @@ ASCILINE/
 │       └── encoder.js           # Client-side encoder to compile videos locally
 │
 # --- 4. Server & Backend Services ---
-├── stream_server.py             # FastAPI sessions, pacing, audio and control endpoints
-├── asciline/                    # Engine adapter, source queue, playback policy and timing
-├── rust_core/                   # Optional native engine, sources and local build script
-├── src/                         # AsciiPlayer SDK, LiveSession and HTML component
-├── docs/                        # Live usage, SDK integration and performance guides
+├── stream_server.py             # FastAPI WebSocket server for real-time video streaming
 ├── ytdl.py                      # yt-dlp integration for dynamic YouTube/URL fetching
 │
 # --- 5. Development & Testing ---
@@ -127,8 +115,6 @@ ASCILINE/
 └── requirements.txt             # Python dependencies
 ```
 
-Further protocol and session-ownership details are in [ARCHITECTURE.md](ARCHITECTURE.md).
-
 ## Adaptive Frame Codec (opt-in, ASCII modes 2-6)
 
 The original protocol re-sends the full grid every frame. An opt-in adaptive codec picks the smallest of several encodings per frame and tags it with a 1-byte header, without changing the rendered output:
@@ -139,13 +125,11 @@ The original protocol re-sends the full grid every frame. An opt-in adaptive cod
 | `1`&nbsp;ZLIB | `zlib(framebuffer)` | general motion |
 | `2`&nbsp;DELTA | only the cells that changed since the last frame | static / low-motion |
 | `3`&nbsp;RLE_FULL | run-length encoded framebuffer | large flat-color regions |
-| `4`&nbsp;DCT | Lossy pixel prediction/DCT | Opt-in live pixel transport for capable clients, and static ASCF profile. |
+| `4`&nbsp;DCT | Discrete Cosine Transform | High-ratio spatial compression. Used exclusively by the static player. Automatically enforces `--pixel` output. |
 
-Tags 0–3 describe adaptive ASCII. Tag 4 is a separately negotiated pixel profile: the server enables `--pixel-codec dct`, and a compatible client requests `codec=adaptive&sync=1&pixel_codec=dct-v1`. DCT activates only for pixel file playback. Root demo and local SDK support this negotiation.
+Clients opt in with `/ws?codec=adaptive`; omit it and you get the original protocol byte-for-byte, so existing clients are unaffected. A keyframe is forced periodically so dropped packets / late joiners resync.
 
-Clients opt in with `/ws?codec=adaptive`; omit it and you get the original protocol byte-for-byte, so existing clients are unaffected. Periodic keyframes reset prediction. Predictive packets still require ordered decoding; sync resets predictors explicitly after seek/reinit.
-
-`codec.js` (the shared decoder used by both the live player and the test suite) understands tags 0–4. **Not every encoder produces every tag**, though: the Python side (`codec.py`, used by the live server and by `compiler.py`) can emit RLE_FULL when it wins the size comparison. The browser-side JS encoder (`static_player/studio/encoder.js`, used by the client-only Studio compiler) intentionally only emits RAW/ZLIB/DELTA — it doesn't implement RLE run-building, to keep the in-browser encoder simple. RAW/ZLIB/DELTA already cover most cases reasonably well, so this is a deliberate simplicity/size trade-off, not a bug — decoders stay permissive, encoders stay conservative.
+`codec.js` (the shared decoder used by both the live player and the test suite) understands all four tags. **Not every encoder produces all four**, though: the Python side (`codec.py`, used by the live server and by `compiler.py`) can emit RLE_FULL when it wins the size comparison. The browser-side JS encoder (`static_player/studio/encoder.js`, used by the client-only Studio compiler) intentionally only emits RAW/ZLIB/DELTA — it doesn't implement RLE run-building, to keep the in-browser encoder simple. RAW/ZLIB/DELTA already cover most cases reasonably well, so this is a deliberate simplicity/size trade-off, not a bug — decoders stay permissive, encoders stay conservative.
 
 **Measured wire savings** (mode 6, 200×80 grid):
 
@@ -154,9 +138,9 @@ Clients opt in with `/ws?codec=adaptive`; omit it and you get the original proto
 | static screen / slideshow | **0.3%** (≈375×) |
 | high-motion / full-frame change | 63% (never worse than legacy) |
 
-An optional `--quality {lossless,high,balanced,low}` enables lossy *temporal delta*: a color cell is only re-sent once it drifts past a tolerance from what the viewer already sees (the character plane stays exact), cutting the hard cases a further ~15–30% with content-dependent color loss. Default is `lossless` (bit-exact). The tolerance presets concern ASCII adaptive coding; DCT quality is a separate setting.
+An optional `--quality {lossless,high,balanced,low}` enables lossy *temporal delta*: a color cell is only re-sent once it drifts past a tolerance from what the viewer already sees (the character plane stays exact), cutting the hard cases a further ~15–30% at imperceptible quality. Default is `lossless` (bit-exact).
 
-**Monitor bandwidth and playback:** pass `--debug` to see RAW vs WIRE rates and compression ratios, plus `[PERF]` reports for delivered FPS, frame production time, delivery lag, and skipped source frames. The root player also reports average decode/draw times and late-frame drops. A slow producer skips overdue source frames before encoding to stay near the audio clock; the requested FPS is a ceiling, not a guarantee on every machine or scene.
+**Monitor bandwidth in real time:** pass `--debug` when launching the server to see live RAW vs WIRE byte comparisons and the compression ratio in your terminal.
 
 > Verified two independent ways, both bit-exact: Python-encoded vectors decoded by `codec.js` in Node (`experiments/gen_vectors.py` → `experiments/check_vectors.js`), and a live `adaptive`-vs-`legacy` WebSocket diff (`experiments/test_e2e.js`). Generate test clips with `experiments/make_test_clips.sh`.
 
@@ -165,11 +149,11 @@ An optional `--quality {lossless,high,balanced,low}` enables lossy *temporal del
 python stream_server.py video.mp4 --host 0.0.0.0
 ```
 
-## Standalone Static Web Player
+## Zero-Dependency Static Web Player
 
 ASCILINE can compile a video into a self-contained `.ascf` (ASCII Compressed Format) file and play it back with a static HTML page — no Python backend at runtime, hostable anywhere (GitHub Pages, Vercel, Netlify).
 
-> **Trade-off:** ASCF stores ASCILINE's representation, which can be larger than standard video. ASCII selection overlays and direct cell/pixel drawing support representation-specific interaction. Video uses a custom JavaScript decoder; audio playback policy still applies.
+> **Trade-off:** compiled `.ascf` files are naturally larger than standard `.mp4`. In exchange you get true DOM-level interaction, pixel-perfect text selection, and no dependency on the browser's video codecs.
 
 There are two ways to produce a `.ascf` file:
 
@@ -204,7 +188,7 @@ The page includes a built-in preview with a **custom seekbar**, allowing you to 
 For the full experience — audio sync and ASCII/pixel mode support — use the main player at `static_player/index.html`.
 
 **Method A: Drag & Drop (No server needed!)**
-Simply open `static_player/index.html` in your browser and drag your `.ascf` file (along with an optional `.mp3` file for audio) directly onto the page. The player reads the selected local files without an ASCILINE backend. Browser file loading and audio playback policy still apply.
+Simply open `static_player/index.html` in your browser and drag your `.ascf` file (along with an optional `.mp3` file for audio) directly onto the page. Playback starts instantly, completely bypassing browser CORS restrictions with zero backend required.
 
 **Method B: Local File Server**
 If you prefer to load files via URL instead of drag-and-drop, serve the folder through a plain static server:
@@ -213,27 +197,9 @@ If you prefer to load files via URL instead of drag-and-drop, serve the folder t
 python -m http.server
 ```
 
-> **Buffering:** a rolling decoded-frame buffer limits retained frames. File loading, seek, decoder state and browser memory still have costs; this is not an unlimited-duration or near-zero-memory guarantee.
+> **Infinite Playback & Low RAM:** The static player uses an aggressive rolling buffer (~3 seconds). Rendered frames are instantly garbage-collected, allowing continuous playback with no duration limit and a near-zero memory footprint.
 
 ## JavaScript SDK (`asciline-player`)
-
-### Live Rust/Python + DCT support in this checkout
-
-The local SDK now negotiates synchronized playback and the `dct-v1` pixel
-profile. The server selects Python/Rust and RAW/DCT; no engine-specific SDK
-option is required. Older servers without synchronized INIT fields retain the
-legacy path. These changes are in this checkout, not yet an npm release.
-
-Start your server, then open
-`http://localhost:8000/static/examples/sdk-live.html` to test the local SDK.
-It provides play/pause, seek, audio enable and disconnect/reconnect controls.
-When hosting the SDK manually, copy the whole `src/` directory: the player
-imports `live-session.js`. The npm package's existing `src` inclusion covers it.
-
-Live sessions serialize DCT decoding, discard stale seek/reinit completions,
-wait for audio startup (or use a wall clock when audio is unavailable), and
-report playback metrics to servers started with `--perf-record`. Static ASCF
-files use their existing separate playback path.
 
 The official JavaScript SDK ships as the `asciline-player` npm package (MIT license). It provides two complementary APIs: a full-featured `AsciiPlayer` class for programmatic control, and a zero-config `<ascf-player>` HTML element for drop-in embedding — both backed by the same high-performance render engine.
 
@@ -261,7 +227,6 @@ Connect to a running `stream_server.py` backend and render in real time:
 </div>
 
 <script type="module">
-  // Bundler/import-map setup; for plain HTML use './src/asciline-player.js'.
   import { AsciiPlayer } from 'asciline-player';
 
   const player = new AsciiPlayer('#ascii-canvas', {
@@ -286,7 +251,6 @@ Play a pre-compiled `.ascf` file directly from any static host (GitHub Pages, Ve
 </div>
 
 <script type="module">
-  // Bundler/import-map setup; for plain HTML use './src/asciline-player.js'.
   import { AsciiPlayer } from 'asciline-player';
 
   const player = new AsciiPlayer('#ascii-canvas', {
@@ -361,7 +325,7 @@ DOM events are dispatched with the `ascf-` prefix (e.g. `ascf-playing`, `ascf-en
 | `clickToPlayPause` | `true` | Click canvas to toggle play/pause |
 | `keyboardShortcuts` | `true` | Spacebar toggles play/pause |
 | `selectionLayer` | `null` | Enable copyable text overlay |
-| `bufferSize` | `4` | Buffer-related sizing; synchronized live preroll stays four frames |
+| `bufferSize` | `4` | Jitter buffer depth (frames) |
 | `filters` | `{}` | Initial filter values (contrast, gamma, brightness…) |
 
 ---
@@ -379,7 +343,7 @@ player.unmute();
 player.setVolume(0.8);        // 0–1
 player.setFilters({ contrast: 1.2, invert: true });
 player.setRenderMode(4);      // switch color depth live (WS only)
-player.seek(30);              // jump to 30s (live or static)
+player.seek(30);              // jump to 30s (WS only)
 player.getMasterClock();      // current position in seconds
 player.getState();            // 'IDLE' | 'CONNECTING' | 'PLAYING' | 'PAUSED' | 'ENDED' | 'ERROR'
 player.destroy();             // clean up all resources
@@ -393,8 +357,6 @@ player.on('ended',       () => { ... });
 player.on('error',       (err) => { ... });
 player.off('timeupdate', handler); // remove listener
 ```
-
-Additional module-hosting, timeline and lifecycle details are in the [SDK reference](docs/SDK.md).
 
 ## Installation
 
@@ -437,7 +399,7 @@ This installs the `ytdlp` extra defined in `pyproject.toml`, pulling in `yt-dlp`
 - macOS: `brew install ffmpeg`
 - Linux: `sudo apt install ffmpeg`
 
-**Manual (Windows):** if you hit a `FileNotFoundError` or don't want to touch system variables, download the [FFmpeg ZIP](https://github.com/BtbN/FFmpeg-Builds/releases/latest), keep `bin/` on PATH or set `ASCILINE_FFMPEG_DIR` to the extracted root. Rust additionally needs shared development headers/libraries; see [Rust installation](rust_core/README.md).
+**Manual (Windows):** if you hit a `FileNotFoundError` or don't want to touch system variables, download the [FFmpeg ZIP](https://github.com/BtbN/FFmpeg-Builds/releases/latest), extract `ffmpeg.exe` and `ffprobe.exe` from `bin/`, and drop both into the project folder next to `stream_server.py`.
 
 ### 3. Run the web server
 
@@ -445,95 +407,6 @@ This installs the `ytdlp` extra defined in `pyproject.toml`, pulling in `yt-dlp`
 ```bash
 python stream_server.py video.mp4 --cols 240
 ```
-
-With automatic rows (the default), the server retains its performance caps:
-125,000 pixels or 12,000 ASCII cells, plus row and portrait limits. To preserve
-the requested columns, add `--no-resolution-limit` (alias: `--no-limit`). For
-example, a 1280x720 video with `--pixel --cols 750` uses 471x265 by default,
-or 750x422 with the flag. This applies to both Python and Rust engines and
-persists when switching ASCII/pixel modes. Larger grids increase server,
-network and browser work; lower `--cols` if playback falls behind. The flag
-does not remove FPS limits or native allocation checks. Explicit `--rows`
-continues to use the supplied dimensions, as before.
-
-```bash
-python stream_server.py video.mp4 --engine rust --pixel --cols 750 --no-resolution-limit
-```
-
-### Optional Rust engine
-
-The base Python install does not build Rust. On Windows, install Cargo and
-Visual Studio x64 C++ Build Tools, and extract a stable FFmpeg 8.1 **shared
-development** package containing `include/`, `lib/` and `bin/`. Keep the matching
-shared libraries available after compilation. Build and run with the same
-Python interpreter; this checkout was verified with Python 3.11 on Windows.
-An executable-only FFmpeg package is sufficient for audio commands but cannot
-build the native engine.
-
-```powershell
-python rust_core/build.py --ffmpeg-dir "C:/dependencies/ffmpeg-shared"
-python -m asciline.engines --engine rust
-```
-
-Replace the path with the extracted development root. Cargo is offline by
-default; add `--online` on a fresh machine without cached dependencies. A
-successful engine check reports Rust, its module path and no fallback reason.
-Native Linux/macOS build paths are available but not validated in this integration.
-
-After building, use `--engine rust` for
-60 FPS pixel playback, or `--engine auto` to allow Python fallback. Python remains
-the default. Build/runtime troubleshooting and the tested FFmpeg archive are documented in [the native build reference](rust_core/README.md).
-
-For Rust file playback, `--decode-threads 2` requests two source-decoder threads;
-`--decode-threads 0` requests automatic selection. Omitting the option preserves
-the codec default. This controls source decoding, independently of DCT encoding
-and the `--decode-ahead 3` source queue. Rebuild the native module before using
-the option. Python fallback and webcam input do not support this override.
-
-Live FPS defaults are **30 for ASCII with either engine**, **60 for Rust pixel**,
-and **30 for Python pixel**. Use `--fps N` to override the FPS ceiling separately
-from engine and resolution. For example, `--engine rust --mode 6 --fps 60`
-opts into 60 FPS ASCII; `--engine rust --pixel --fps 30` limits pixel playback.
-`--no-limit` only changes resolution. Switching ASCII/pixel modes recalculates
-the default FPS; an explicit `--fps` stays in effect. Frames are sampled at
-uniform source intervals, so 59.94 FPS becomes 29.97 with a 30 FPS ceiling,
-and 50 FPS becomes 25. Lower-rate sources are not interpolated. Higher FPS
-increases browser work and is not a guarantee of smooth playback.
-
-**Opt-in live DCT (pixel only):** the root demo and local SDK negotiate the existing
-lossy tag-4 profile. Enable it with `--pixel-codec dct`; `--dct-quality 70`
-sets quality from 1 to 100 (lower is smaller/lossier; 100 is not lossless). The raw transport
-remains the default. For the locally verified 60 FPS configuration, enable the bounded source queue:
-
-```bash
-python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --dct-quality 70 --cols 450 --fps 60 --no-thumbnails --decode-ahead 3
-```
-
-The grid rounds up to multiples of 16 for the DCT/YUV420 planes; the server
-prints the actual size. Seek and mode changes restart the predictor with a
-keyframe. Clients without the explicit DCT capability, including older
-npm SDK releases, keep receiving raw pixels; this checkout's SDK negotiates DCT.
-Python can encode the same profile with
-`--engine python`; Rust uses the native implementation after rebuilding.
-DCT reduces bandwidth at the cost of image fidelity and extra encode/decode
-work, so raw-pixel FPS does not predict DCT FPS. See [performance evidence](docs/PERFORMANCE.md) for measured gains, costs and recording. Historical [initial integration notes](experiments/rust_audit/DCT_INTEGRATION.md) describe earlier results before later optimizations.
-
-**What the integration achieved:** on the tested local 60 FPS source, the Rust/DCT
-pipeline plays near the source rate at a 464x256 coded grid. Seek, pause/resume,
-ASCII/pixel switching and SDK reconnection are covered by the automated live
-tests and owner playback checks. The browser still reconstructs DCT in
-JavaScript; Rust accelerates the source and server encoding stages.
-
-Native DCT optimization measured approximately **1.83–1.99x faster encoding**
-on three identical-input windows, with matching packet and reconstruction hashes.
-Decode-ahead reduces consumer waiting by overlapping source preparation and
-encoding. Thread overrides remain optional because faster source decode can
-compete with encoding. These results apply to the measured workload rather than
-all sources and machines. The [performance reference](docs/PERFORMANCE.md)
-contains methods, results and recording instructions; the [live reference](docs/LIVE_STREAMING.md)
-collects the tuning defaults explained above.
-
-### Other source and queue options
 
 **YouTube / URL (requires the `ytdlp` extra):**
 ```bash
@@ -550,7 +423,7 @@ python stream_server.py --cache-limit 5000   # cap the video cache at 5 GB (defa
 - ASCII rendering only needs a small grid, so yt-dlp fetches at ≤480p to save bandwidth.
 - Downloads are cached by video ID in `videos/` — replays are instant.
 - Playlist/channel URLs and `playlist.json` expand into a queue and fetch on demand; the server starts immediately instead of waiting for bulk downloads.
-- Downloaded videos are normalized to H.264/AAC constant frame rate. Normalization may lower source FPS; use a local original when measuring 60 FPS.
+- Every downloaded video is normalized to H.264/AAC constant frame rate, so A/V sync holds regardless of the source codec.
 
 **Folder mode** — drop videos into `videos/` and run:
 ```bash
@@ -558,7 +431,7 @@ python stream_server.py --folder videos --cols 200
 python stream_server.py --folder videos --cols 230 --loop
 python stream_server.py --folder videos --pixel --cols 320 --vol 2
 ```
-Folder mode builds its queue from files present at startup. Restart after changing files to rebuild the queue.
+Videos play in filesystem order (as they appear in the folder, not alphabetically). Add/remove files to control the queue.
 
 **JSON playlist** — per-video overrides:
 ```bash
@@ -586,7 +459,7 @@ python stream_server.py --webcam --no-mirror
 
 ### 4. Run directly in a terminal (standalone)
 
-Bypass the web interface and render inside an ANSI-capable terminal with true-color support:
+Bypass the web interface and render inside an ANSI-capable terminal (zero flicker, true color):
 ```bash
 python ascii_video_player2.py video.mp4 --cols 100 --quality 0
 
@@ -598,7 +471,7 @@ python ascii_video_player2.py --webcam --cols 100
 
 ## Running with Docker
 
-ASCILINE ships with a `Dockerfile` and `docker-compose.yml` for running the live streaming server without installing Python, FFmpeg, or any dependency on the host. The image is based on `python:3.11-slim`, installs FFmpeg/FFprobe and CA certificates, and swaps `opencv-python` for `opencv-python-headless` at build time (the container has no display, so this is the lighter drop-in — see [Requirements](#0-requirements)). Note that webcam and terminal-standalone (`ascii_video_player2.py`) modes aren't practical inside a container — Docker is intended for the web streaming server (`stream_server.py`), which by default runs in **folder mode**, loading files from `videos/` at startup. This recipe does not build Rust.
+ASCILINE ships with a `Dockerfile` and `docker-compose.yml` for running the live streaming server without installing Python, FFmpeg, or any dependency on the host. The image is based on `python:3.11-slim`, installs FFmpeg/FFprobe and CA certificates, and swaps `opencv-python` for `opencv-python-headless` at build time (the container has no display, so this is the lighter drop-in — see [Requirements](#0-requirements)). Note that webcam and terminal-standalone (`ascii_video_player2.py`) modes aren't practical inside a container — Docker is intended for the web streaming server (`stream_server.py`), which by default runs in **folder mode**, watching `videos/`.
 
 ### Docker Compose (recommended)
 
@@ -606,7 +479,7 @@ ASCILINE ships with a `Dockerfile` and `docker-compose.yml` for running the live
 docker compose up --build
 ```
 
-This builds the image and starts `stream_server.py --folder videos --host 0.0.0.0 --port 8000`, exposing the web UI on `http://localhost:8000`. `docker-compose.yml` mounts `./videos` on the host to `/app/videos` in the container — drop your `.mp4`/`.mkv`/etc. files into your local `videos/` folder and restart the service to rebuild its queue, without rebuilding the image. `stdin_open`/`tty` are enabled for interactive terminal commands. High-FPS sources are automatically sampled to the selected FPS ceiling.
+This builds the image and starts `stream_server.py --folder videos --host 0.0.0.0 --port 8000`, exposing the web UI on `http://localhost:8000`. `docker-compose.yml` mounts `./videos` on the host to `/app/videos` in the container — drop your `.mp4`/`.mkv`/etc. files into your local `videos/` folder and they'll show up automatically, no rebuild needed. `stdin_open`/`tty` are enabled so interactive terminal prompts still work; the high-FPS y/n confirmation prompt is skipped automatically when running in Docker.
 
 ### Plain Docker
 
