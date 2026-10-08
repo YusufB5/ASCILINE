@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCILINE <ascf-player> Demo</title>
+<script src="ascf-player.js"></script>
+<style>
+  body {
+    margin: 0; padding: 2rem; background: #0b0d10; color: #cbd5e1;
+    font: 14px/1.6 ui-monospace, monospace;
+    display: flex; flex-direction: column; align-items: center; max-width: 960px; margin-inline: auto;
+  }
+  h1 { font-size: 1.2rem; letter-spacing: .2em; text-transform: uppercase; color: #7dd3fc; margin-bottom: 0.5rem; }
+  p  { margin: 0 0 1.5rem; color: #64748b; }
+  ascf-player {
+    width: 100%;
+    max-width: 900px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  #status {
+    margin-top: 1rem;
+    padding: 0.5rem 1rem;
+    background: #1e293b;
+    border-radius: 6px;
+    color: #38bdf8;
+    font-family: monospace;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+  <h1>&lt;ascf-player&gt; Demo</h1>
+  <p>Testing Ripudaman's Web Component with ASCILINE <code>163sJtJecZI.ascf</code> (300x169 Pixel Mode)</p>
+
+  <ascf-player id="player" src="../static_player/163sJtJecZI.ascf" audio="../static_player/163sJtJecZI.mp3" controls autoplay loop></ascf-player>
+
+  <div id="status">Loading clip metadata...</div>
+
+  <script>
+    const player = document.getElementById('player');
+    const status = document.getElementById('status');
+    player.addEventListener('loadedmetadata', () => {
+      const m = player.metadata;
+      status.textContent = `Metadata: ${m.cols}x${m.rows} · Mode: ${m.renderMode} (${m.pixelMode ? 'Pixel Mode' : 'ASCII Mode'}) · FPS: ${m.fps.toFixed(1)} · Total Frames: ${m.totalFrames} · Duration: ${m.duration.toFixed(1)}s`;
+    });
+    player.addEventListener('error', (e) => {
+      status.textContent = 'Error: ' + (e.detail ? (e.detail.message || e.detail) : 'Failed to load clip');
+      status.style.color = '#ef4444';
+    });
+  </script>
+</body>
+</html>
