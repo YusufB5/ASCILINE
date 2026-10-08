@@ -237,8 +237,8 @@ def calc_auto_dimensions(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_WHITELIST = {
     "app.js", "style.css", "codec.js", 
-    "src/asciline-player.js", "src/index.js",
-    "examples/quickstart.html"
+    "src/asciline-player.js", "src/live-session.js", "src/index.js",
+    "examples/quickstart.html", "examples/sdk-live.html"
 }
 
 @app.get("/static/{filename:path}")
@@ -727,8 +727,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     rows=2,
                     skip_gray=pixel_mode,
                     mirror=mirror,
-                    fallback_fps=fallback_fps
+                    fallback_fps=fallback_fps,
+                    decode_threads=getattr(app.state, "decode_threads", None)
                 )
+                if decoder.engine.name == "rust" and hasattr(decoder, "decoder_name"):
+                    count = decoder.decode_threads
+                    print(f"[SOURCE] {decoder.decoder_name} | decode threads: {'auto' if count == 0 else count}")
             except FileNotFoundError:
                 await websocket.send_text(f"Error: '{video_path}' not found!")
                 queue_index += 1
@@ -789,6 +793,8 @@ async def websocket_endpoint(websocket: WebSocket):
                        queue_index=queue_index, sync=sync_requested,
                        source=os.path.basename(str(video_path)), source_width=vid_w,
                        source_height=vid_h, source_frames=decoder.frame_count,
+                       decode_threads=getattr(decoder, "decode_threads", None),
+                       decoder_name=getattr(decoder, "decoder_name", None),
                        decode_ahead=getattr(app.state, "decode_ahead", 0) if
                        decoder.engine.name == "rust" and pixel_mode and not is_webcam else 0,
                        native_version=getattr(decoder.engine.native, "__version__", None))
@@ -1553,6 +1559,8 @@ if __name__ == "__main__":
                      help="Record per-frame stage timings and playback events to a new JSONL file in DIR")
     srv.add_argument("--decode-ahead", type=int, choices=[0, 2, 3], default=0,
                      help="Experimental bounded source queue for Rust pixel playback (default: 0/off)")
+    srv.add_argument("--decode-threads", type=int, metavar="N", default=None,
+                     help="Rust file decoder threads: 0=auto, 1..64=fixed; omitted preserves codec default")
     srv.add_argument("--engine", choices=["python", "rust", "auto"], default="python",
                      help="File decoder and adaptive encoder (default: python; Rust pixel defaults to 60 FPS, ASCII to 30)")
     srv.add_argument("--cache-limit", type=int, default=10240, help="Cache limit in MB for downloaded videos (default: 10240 = 10GB)")
@@ -1562,6 +1570,13 @@ if __name__ == "__main__":
         resolve_fps_limit(args.engine, args.pixel, args.fps)
         validate_profile_quality(args.dct_quality)
         app.state.engine = get_engine(args.engine)
+        if args.decode_threads is not None:
+            if not 0 <= args.decode_threads <= 64:
+                raise ValueError("--decode-threads must be between 0 and 64")
+            if not app.state.engine.native:
+                raise ValueError("--decode-threads requires the Rust file decoder")
+            if not getattr(app.state.engine.native, "DECODE_THREADS_SUPPORTED", False):
+                raise RuntimeError("Native decode_threads support is unavailable; rebuild rust_core with this checkout")
         if args.pixel_codec == "dct" and app.state.engine.native and not hasattr(app.state.engine.native, "ProfileEncoder"):
             raise RuntimeError("Native DCT is unavailable; rebuild rust_core with this checkout")
     except (ValueError, RuntimeError) as exc:
@@ -1578,6 +1593,8 @@ if __name__ == "__main__":
 
     # Build the queue
     queue = build_queue(args)
+    if args.decode_threads is not None and any(entry.get("is_webcam") for entry in queue):
+        parser.error("--decode-threads supports file playback, not webcam input")
 
     if not queue:
         print("[ERROR] No videos found. Check your --playlist / --folder / video argument.")
@@ -1591,6 +1608,7 @@ if __name__ == "__main__":
 
     app.state.debug         = args.debug
     app.state.decode_ahead  = args.decode_ahead
+    app.state.decode_threads = args.decode_threads
     app.state.perf_trace    = None
     if args.perf_record:
         try:

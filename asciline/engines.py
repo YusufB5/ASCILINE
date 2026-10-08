@@ -74,6 +74,15 @@ class Engine:
     def decoder(self, path, cols, rows, **kwargs):
         # Device indices remain on OpenCV; the native decoder is a file engine.
         active = self if not isinstance(path, int) else Engine("python")
+        decode_threads = kwargs.pop("decode_threads", None)
+        if decode_threads is not None:
+            if type(decode_threads) is not int or not 0 <= decode_threads <= 64:
+                raise ValueError("decode_threads must be an integer between 0 and 64")
+            if not active.native:
+                raise ValueError("decode_threads requires the Rust file decoder")
+            if not getattr(active.native, "DECODE_THREADS_SUPPORTED", False):
+                raise RuntimeError("Native decode_threads support is unavailable; rebuild rust_core with this checkout")
+            kwargs["decode_threads"] = decode_threads
         implementation = active.native.VideoDecoder if active.native else PythonDecoder
         return Decoder(implementation(path, cols, rows, **kwargs), active)
 

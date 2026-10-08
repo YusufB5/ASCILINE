@@ -62,7 +62,9 @@ def test_late_producer_catches_clock_without_breaking_dct(live_server, tmp_path)
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("live_server", [DCT_ARGS, [*DCT_ARGS, "--decode-ahead", "3"]], indirect=True)
+@pytest.mark.parametrize("live_server", [DCT_ARGS, [*DCT_ARGS, "--decode-ahead", "3"],
+    [*DCT_ARGS, "--decode-ahead", "3", "--decode-threads", "2"],
+    [*DCT_ARGS, "--decode-ahead", "3", "--decode-threads", "0"]], indirect=True)
 def test_live_profile_seek_modes_reconnect_and_browser_truth(live_server, tmp_path):
     port, engine, clip = live_server
     sequences = []

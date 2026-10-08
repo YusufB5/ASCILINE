@@ -123,6 +123,25 @@ def test_invalid_seek(engine, clip, seconds):
             decoder.seek(seconds)
 
 
+@pytest.mark.parametrize("threads", [0, 1, 2, 4])
+def test_threaded_decode_preserves_frames_and_seek(engine, clip, threads):
+    with engine.decoder(str(clip), 160, 90, skip_gray=True) as decoder:
+        reference = [(decoder.position, fingerprint(bgr)) for _, bgr in decoder]
+    with engine.decoder(str(clip), 160, 90, skip_gray=True, decode_threads=threads) as decoder:
+        assert decoder.decoder_name
+        assert [(decoder.position, fingerprint(bgr)) for _, bgr in decoder] == reference
+        for target, index in [(1.23, 74), (.35, 21), (2.35, 141), (0, 0)]:
+            assert decoder.seek(target)
+            _, bgr = next(decoder)
+            assert (decoder.position, fingerprint(bgr)) == reference[index]
+
+
+@pytest.mark.parametrize("threads", [-1, 65])
+def test_native_rejects_invalid_decode_threads(engine, clip, threads):
+    with pytest.raises(ValueError, match="between 0 and 64"):
+        engine.native.VideoDecoder(str(clip), 16, 16, decode_threads=threads)
+
+
 def test_native_validation(engine, clip):
     native = engine.native
     with pytest.raises(ValueError):

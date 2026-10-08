@@ -19,7 +19,8 @@ if (!existsSync(sdkPath)) {
     process.exit(1);
 }
 
-const sdkSource = readFileSync(sdkPath, 'utf-8');
+const sdkSource = readFileSync(sdkPath, 'utf-8') + '\n' +
+    readFileSync(resolve(__dirname, '../src/live-session.js'), 'utf-8');
 
 // ── Verify class is exported ─────────────────────────────────────────────────
 const hasClass  = /class AsciiPlayer/.test(sdkSource);
@@ -91,4 +92,4 @@ if (!allPassed) {
     console.error('\n[RESULT] SDK import test FAILED');
     process.exit(1);
 }
-console.log('\n[RESULT] SDK import test PASSED — AsciiPlayer SDK is complete');
+console.log('\n[RESULT] SDK API surface smoke test PASSED');

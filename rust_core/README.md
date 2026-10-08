@@ -82,6 +82,20 @@ See `experiments/rust_audit/DCT_INTEGRATION.md` for measurements and reproductio
 
 ## Build
 
+Use stable FFmpeg **8.1 shared development** libraries with the locked
+`ffmpeg-next 8.1.0` dependency. Development/nightly headers may introduce enum
+entries the wrapper cannot compile. A working older DLL does not prove that
+a fresh dependency build against the currently installed headers will succeed.
+
+Validated on Windows with BtbN `n8.1.3-14-g330caae0c1-20261003`, LGPL shared,
+downloaded from the [BtbN releases](https://github.com/BtbN/FFmpeg-Builds/releases).
+The tested archive SHA256 is
+`54f1f8cc5f6db333e8c34f19fb38dcc79d6427b38ecdd1a6dade1664be8018d5`.
+The upstream `latest` asset changes; this checksum identifies the tested
+artifact, not every later download. Store local dependencies under ignored
+`rust_core/.deps/` or supply your own directory. No vendor patches are needed
+for the validated stable build.
+
 Requirements: base ASCILINE Python dependencies, Cargo, and FFmpeg headers
 and libraries. On Windows, use a **shared development** FFmpeg build with
 `bin/`, `include/`, `lib/`, and Visual Studio x64 C++ Build Tools. A normal
@@ -106,6 +120,28 @@ On Windows, the loader retains DLL search handles. `ASCILINE_FFMPEG_DIR`
 or `FFMPEG_DIR` can override the FFmpeg runtime directory.
 
 ## Integration API
+
+### Source decoder concurrency
+
+`stream_server.py --engine rust --decode-threads N` controls source-video
+decoder concurrency, independently of the DCT encoder and decode-ahead queue:
+
+- Omit the flag to preserve the codec's existing default (no thread override).
+- `--decode-threads 2` requests two source-decoder threads.
+- `--decode-threads 0` lets the decoder choose automatically.
+- Accepted range: 0–64. Python fallback and webcam input reject this option.
+
+The Python native adapter accepts `decode_threads=None` or an integer in the
+same range. The option requires a rebuilt DLL; older DLLs produce an explicit
+rebuild error when the override is requested. Server logs and performance
+records include decoder name and configured thread count. A zero value denotes
+automatic selection, not zero actual workers. Codec implementations may adjust
+the requested count.
+
+Keep `--decode-ahead 3` fixed when comparing these settings. Increased source
+concurrency can compete with DCT encoding; do not assume automatic or larger
+counts always improve end-to-end playback. See
+`experiments/rust_audit/DECODER_THREAD_FINDINGS.md` for measurements.
 
 ```python
 from asciline.engines import get_engine

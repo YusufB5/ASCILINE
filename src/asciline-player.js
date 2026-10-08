@@ -1,3 +1,5 @@
+import { LiveSession } from './live-session.js';
+
 /**
  * SPDX-License-Identifier: MIT
  * Part of ASCILINE — Licensed under MIT (see LICENSE-MIT)
@@ -333,6 +335,8 @@ export class AsciiPlayer {
         // Internal State
         this.state = 'IDLE'; // IDLE | CONNECTING | PLAYING | PAUSED | ENDED | ERROR
         this.ws = null;
+        this._live = null;
+        this._rafId = null;
         this.frameBuffer = [];
         this.codecDecoder = null;
         this.decodeQueue = Promise.resolve();
@@ -480,28 +484,12 @@ export class AsciiPlayer {
             return;
         }
 
-        // ── Live WebSocket mode (original behaviour, unchanged) ──
-        // Unlock audio context while we're inside a user-gesture call stack.
-        // Browsers require audio.play() to be called synchronously from a user
-        // gesture (click, tap, keydown). By the time the first INIT frame arrives
-        // over WebSocket (~200 ms later), the gesture context is already gone.
-        // Calling play() here — even on an empty src — permanently marks the
-        // page as audio-allowed, so the real play() inside _triggerPlaybackStart
-        // will succeed without being blocked by autoplay policy.
-        if (this.audioEl && !this._audioUnlocked) {
-            this.audioEl.play().then(() => {
-                this._audioUnlocked = true;
-            }).catch(() => {
-                // Even a rejection still unlocks audio on most browsers.
-                this._audioUnlocked = true;
-            });
-        }
-
-        this._connectWebSocket();
+        this._connectWebSocket(resolvedSrc);
     }
 
     pause() {
         if (this.state !== 'PLAYING' || this.isWebcamStream) return;
+        if (this._live) return this._live.pause();
         this._setState('PAUSED');
         this.pauseStartTime = performance.now();
 
@@ -516,6 +504,7 @@ export class AsciiPlayer {
 
     resume() {
         if (this.state !== 'PAUSED') return;
+        if (this._live) return this._live.resume();
         this._setState('PLAYING');
         this.readyToRender = true;
         this._hidePauseOverlay();
@@ -547,7 +536,7 @@ export class AsciiPlayer {
         this.lastRenderTime = performance.now();
         this.lastFpsUpdate = performance.now();
         this.frameCount = 0;
-        requestAnimationFrame(this._renderBound);
+        this._scheduleRender();
     }
 
     togglePlay() {
@@ -565,6 +554,7 @@ export class AsciiPlayer {
     }
 
     seek(targetSec) {
+        if (this._live) return this._live.seek(targetSec);
         if (this.isWebcamStream) return;
         if (this.duration) targetSec = Math.max(0, Math.min(targetSec, this.duration));
 
@@ -592,7 +582,7 @@ export class AsciiPlayer {
                         this.lastRenderTime = performance.now();
                         this.lastFpsUpdate = performance.now();
                         this.frameCount = 0;
-                        requestAnimationFrame(this._renderBound);
+                        this._scheduleRender();
                     }
                 };
                 if (this.audioEl.readyState >= 3) onAudioStart();
@@ -635,6 +625,7 @@ export class AsciiPlayer {
 
     async unmute() {
         if (!this.audioEl) return;
+        if (this._live) return this._live.unmute();
         // If video has been running on wall-clock while audio was blocked,
         // seek the audio stream to the current video position so they sync up instantly.
         if (this._audioGated && this.readyToRender && !this.isWebcamStream) {
@@ -674,6 +665,7 @@ export class AsciiPlayer {
     }
 
     getMasterClock() {
+        if (this._live) return this._live.clock();
         // Audio is the master clock as long as it has loaded metadata (readyState >= 1).
         if (this.audioEl && this.audioEl.readyState >= 1) {
             if (this._audioGated && this.audioEl.paused && this.audioEl.currentTime === 0) {
@@ -699,6 +691,7 @@ export class AsciiPlayer {
     }
 
     setPixelMode(enable) {
+        if (this._live) return this._live.reinit({ pixel: Boolean(enable) });
         this.pixelMode = Boolean(enable);
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({
@@ -710,6 +703,7 @@ export class AsciiPlayer {
     }
 
     setRenderMode(mode) {
+        if (this._live) return this._live.reinit({ mode });
         this.renderMode = mode;
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({
@@ -959,6 +953,11 @@ export class AsciiPlayer {
     }
 
     destroy() {
+        this._live?.dispose();
+        this._live = null;
+        this.streamEpoch++;
+        this._stopRendering();
+        if (this.filterSendTimer) clearTimeout(this.filterSendTimer);
         this._hidePlayOverlay();
         this._removePauseOverlay();
         this._removeMuteButton();
@@ -1011,139 +1010,24 @@ export class AsciiPlayer {
 
     // ── INTERNAL WEBSOCKET & RENDER ──
 
-    _connectWebSocket() {
-        this.frameBuffer.length = 0;
-        this.frameCount = 0;
-        this.currentFps = 0;
+    _connectWebSocket(url) {
+        this._live?.dispose();
+        this._ascfSrc = null;
+        this._live = new LiveSession(this, AscilineCodecApi, url);
+        this._live.connect();
+    }
 
-        let wsUrl = this.options.url;
-        if (!wsUrl || wsUrl === 'auto') {
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            wsUrl = `${protocol}//${location.host}/ws?codec=adaptive`;
-        }
-        // Auto-append ?codec=adaptive if the caller didn't specify it.
-        // Without this flag the server sends untagged binary frames that the
-        // inlined decoder cannot parse, resulting in a silent black screen.
-        if (!wsUrl.includes('codec=')) {
-            wsUrl += (wsUrl.includes('?') ? '&' : '?') + 'codec=adaptive';
-        }
-        this.resolvedWsUrl = wsUrl;
+    _stopRendering() {
+        if (this._rafId !== null) cancelAnimationFrame(this._rafId);
+        this._rafId = null;
+    }
 
-        this.ws = new WebSocket(wsUrl);
-        this.ws.binaryType = 'arraybuffer';
-
-        this.ws.onopen = () => {
-            this.emit('buffering');
-        };
-
-        this.ws.onmessage = (event) => {
-            if (typeof event.data === 'string') {
-                if (event.data.startsWith('Error:')) {
-                    this.emit('error', event.data);
-                    if (this.ws) this.ws.close();
-                    this._finishStream('ERROR');
-                    return;
-                }
-
-                if (event.data.startsWith('INIT:')) {
-                    const p = event.data.split(':');
-                    this.targetFps = parseFloat(p[1]);
-                    this.frameInterval = 1000 / this.targetFps;
-                    this.renderMode = parseInt(p[2]);
-                    this.pixelMode = (p.length > 5 && parseInt(p[5]) === 1);
-                    this.currentQueueIdx = (p.length > 6) ? parseInt(p[6]) : 0;
-                    this.duration = (p.length > 7) ? parseFloat(p[7]) : 0;
-                    const startOffset = (p.length > 8) ? parseFloat(p[8]) : 0;
-                    this.isWebcamStream = (p.length > 9 && parseInt(p[9]) === 1);
-
-                    this.audioOffset = startOffset;
-                    this.frameBuffer.length = 0;
-                    this.framesInFlight = 0;
-                    this.streamEpoch++;
-
-                    this._buildCanvas(parseInt(p[3]), parseInt(p[4]));
-
-                    if (this.renderMode > 1 && !this.pixelMode) {
-                        this.codecDecoder = AscilineCodecApi.makeDecoder(4);
-                    } else {
-                        this.codecDecoder = null;
-                    }
-
-                    this.decodeQueue = Promise.resolve();
-                    const wasPaused = (this.state === 'PAUSED');
-                    this.readyToRender = false;
-                    if (!wasPaused) this._setState('PLAYING');
-
-                    if (this.audioEl && !this.isWebcamStream) {
-                        this.audioEl.pause();
-                        const qs = `v=${this.currentQueueIdx}&`;
-                        const st = startOffset > 0 ? `start=${startOffset}&` : '';
-                        this.audioEl.src = this._getAudioUrl(`${qs}${st}t=${Date.now()}`);
-                        this.audioEl.load();
-                    }
-
-                    this.setFilters(this.currentFilters);
-                    this.emit('init', {
-                        fps: this.targetFps,
-                        cols: parseInt(p[3]),
-                        rows: parseInt(p[4]),
-                        duration: this.duration,
-                        pixelMode: this.pixelMode,
-                        renderMode: this.renderMode,
-                        queueIdx: this.currentQueueIdx,
-                        isWebcam: this.isWebcamStream
-                    });
-                    return;
-                }
-
-                // Text Frame (Mode 1)
-                const text = event.data;
-                const newlineIdx = text.indexOf('\n');
-                const frameIndex = parseInt(text.substring(0, newlineIdx));
-                const frameTime = frameIndex / this.targetFps;
-                const frameData = text.substring(newlineIdx + 1);
-                this.frameBuffer.push({ data: frameData, time: frameTime });
-                this._triggerPlaybackStart(this.streamEpoch);
-            } else {
-                // Binary Frame
-                if (this.codecDecoder) {
-                    this.framesInFlight++;
-                    this.decodeQueue = this.decodeQueue.then(() =>
-                        this.codecDecoder.decode(event.data).then(({ frameIndex, frame }) => {
-                            this.framesInFlight--;
-                            const frameTime = frameIndex / this.targetFps;
-                            this.frameBuffer.push({ data: frame, time: frameTime });
-                            this._triggerPlaybackStart(this.streamEpoch);
-                        }).catch(e => {
-                            this.framesInFlight--;
-                            console.error("Decode error", e);
-                        })
-                    );
-                } else {
-                    const buffer = event.data;
-                    const view = new DataView(buffer);
-                    const frameIndex = view.getUint32(0, false);
-                    const frameTime = frameIndex / this.targetFps;
-                    const frameData = new Uint8Array(buffer, 4);
-                    this.frameBuffer.push({ data: frameData, time: frameTime });
-                    this._triggerPlaybackStart(this.streamEpoch);
-                }
-            }
-
-            while (this.frameBuffer.length > this.options.bufferSize * 5) {
-                this.frameBuffer.shift();
-            }
-        };
-
-        this.ws.onclose = (event) => {
-            const endedCleanly = event.code === 1000;
-            this._finishStream(endedCleanly ? 'ENDED' : 'ERROR');
-        };
-
-        this.ws.onerror = (e) => {
-            this.emit('error', e);
-            this._finishStream('ERROR');
-        };
+    _scheduleRender() {
+        if (this._rafId !== null) return;
+        this._rafId = requestAnimationFrame(now => {
+            this._rafId = null;
+            this._renderBound(now);
+        });
     }
 
     // ── STATIC ASCF FILE PLAYBACK ──
@@ -1373,7 +1257,7 @@ export class AsciiPlayer {
         this.streamStartTime = performance.now() - (this.audioOffset * 1000.0);
         this.lastRenderTime = performance.now();
         this.lastFpsUpdate = this.lastRenderTime;
-        requestAnimationFrame(this._renderBound);
+        this._scheduleRender();
         this._startBufferReports();
     }
 
@@ -1381,7 +1265,15 @@ export class AsciiPlayer {
         this._stopBufferReports();
         this.bufferReportTimer = setInterval(() => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN && this.state === 'PLAYING') {
-                this.ws.send(JSON.stringify({ type: 'buffer', depth: this.framesInFlight }));
+                const m = this._live?.metrics;
+                this.ws.send(JSON.stringify({ type: 'buffer', depth: this.framesInFlight,
+                    ...(m ? { requestId: this._live.syncId,
+                        decodeMs: m.decoded ? m.decodeMs / m.decoded : 0,
+                        renderMs: m.rendered ? m.renderMs / m.rendered : 0,
+                        decoded: m.decoded, rendered: m.rendered,
+                        lateDrops: m.lateDrops, decodeErrors: m.decodeErrors,
+                        renderBuffer: this.frameBuffer.length, clock: this.getMasterClock(),
+                        displayTime: m.displayTime, hidden: document.hidden } : {}) }));
             }
         }, 250);
     }
@@ -1468,7 +1360,7 @@ export class AsciiPlayer {
 
     _renderFrame(now) {
         if (this.state !== 'PLAYING' || !this.readyToRender) return;
-        requestAnimationFrame(this._renderBound);
+        this._scheduleRender();
 
         const masterClock = this.getMasterClock();
 
@@ -1487,12 +1379,18 @@ export class AsciiPlayer {
         } else {
             while (this.frameBuffer.length > 0 && this.frameBuffer[0].time < masterClock - 0.1) {
                 this.frameBuffer.shift();
+                if (this._live) this._live.metrics.lateDrops++;
             }
             if (this.frameBuffer.length === 0) return;
             if (this.frameBuffer[0].time > masterClock + 0.05) return;
             frameObj = this.frameBuffer.shift();
         }
 
+        if (this._live) {
+            this._live.metrics.rendered++;
+            this._live.metrics.displayTime = frameObj.time;
+        }
+        const renderTick = performance.now();
         const frame = frameObj.data;
 
         this.frameCount++;
@@ -1579,9 +1477,15 @@ export class AsciiPlayer {
                 }
             }
         }
+        if (this._live) this._live.metrics.renderMs += performance.now() - renderTick;
     }
 
     _finishStream(finalState = 'IDLE') {
+        if (this.filterSendTimer) clearTimeout(this.filterSendTimer);
+        this.filterSendTimer = null;
+        this._live?.dispose();
+        this._live = null;
+        this._stopRendering();
         this._setState(finalState);
         this._stopBufferReports();
         if (this.ws) {

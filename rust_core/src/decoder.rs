@@ -57,6 +57,7 @@ impl DecoderCore {
         skip_gray: bool,
         mirror: bool,
         fallback_fps: f64,
+        decode_threads: Option<i32>,
     ) -> Result<(Self, Metadata), Error> {
         ffmpeg::init()?;
         let input = ffmpeg::format::input(&path)?;
@@ -65,9 +66,13 @@ impl DecoderCore {
             .best(ffmpeg::media::Type::Video)
             .ok_or(Error::StreamNotFound)?;
         let stream_index = stream.index();
-        let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
-            .decoder()
-            .video()?;
+        let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
+        if let Some(count) = decode_threads {
+            // Keep FFmpeg's default thread_type flags and codec selection.
+            // Zero requests automatic concurrency; None preserves its default.
+            unsafe { (*context.as_mut_ptr()).thread_count = count; }
+        }
+        let decoder = context.decoder().video()?;
         let time_base = f64::from(stream.time_base());
         let origin_seconds = if stream.start_time() == ffmpeg::ffi::AV_NOPTS_VALUE {
             0.0
@@ -309,7 +314,7 @@ fn runtime_error(error: Error) -> PyErr {
 #[pymethods]
 impl PyVideoDecoder {
     #[new]
-    #[pyo3(signature = (path, cols, rows, skip_gray=false, mirror=false, fallback_fps=0.0))]
+    #[pyo3(signature = (path, cols, rows, skip_gray=false, mirror=false, fallback_fps=0.0, decode_threads=None))]
     fn new(
         py: Python<'_>,
         path: &str,
@@ -318,15 +323,19 @@ impl PyVideoDecoder {
         skip_gray: bool,
         mirror: bool,
         fallback_fps: f64,
+        decode_threads: Option<i32>,
     ) -> PyResult<Self> {
         dimensions(cols, rows)?;
+        if decode_threads.is_some_and(|count| !(0..=64).contains(&count)) {
+            return Err(PyValueError::new_err("decode_threads must be between 0 and 64"));
+        }
         if !fallback_fps.is_finite() || fallback_fps < 0.0 {
             return Err(PyValueError::new_err(
                 "fallback_fps must be finite and non-negative",
             ));
         }
         let (core, metadata) = py
-            .allow_threads(|| DecoderCore::open(path, cols, rows, skip_gray, mirror, fallback_fps))
+            .allow_threads(|| DecoderCore::open(path, cols, rows, skip_gray, mirror, fallback_fps, decode_threads))
             .map_err(|error| {
                 PyFileNotFoundError::new_err(format!(
                     "Could not open video source {path:?}: {error}"
@@ -377,6 +386,16 @@ impl PyVideoDecoder {
                 .map(|frame| frame.is_some())
                 .map_err(runtime_error)
         })
+    }
+
+    #[getter]
+    fn decode_threads(&self, py: Python<'_>) -> PyResult<i32> {
+        self.with_core(py, |core| Ok(unsafe { (*core.decoder.as_ptr()).thread_count }))
+    }
+
+    #[getter]
+    fn decoder_name(&self, py: Python<'_>) -> PyResult<String> {
+        self.with_core(py, |core| Ok(core.decoder.codec().map(|codec| codec.name().to_owned()).unwrap_or_default()))
     }
 
     fn seek(&self, py: Python<'_>, target_sec: f64) -> PyResult<bool> {

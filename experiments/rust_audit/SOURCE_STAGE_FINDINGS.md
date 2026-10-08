@@ -71,6 +71,13 @@ No general speedup, all-device result or browser FPS follows from this profile.
 
 ## Next experiment
 
+Update 2026-10-04: the bounded concurrency experiment is recorded in
+`DECODER_THREAD_FINDINGS.md`. The current source decoder selected libdav1d with
+one thread; explicit automatic threading reduced source-call waiting in the
+tested workload without changing output hashes. Production defaults remain
+unchanged. An opt-in `--decode-threads` integration and clean stable FFmpeg 8.1
+build have since passed validation; details are in that follow-up report.
+
 Inspect the source decoder actually selected by FFmpeg and its threading
 configuration; test a small, bounded set of decode concurrency settings. Keep
 the source queue, output grid, color conversion and DCT quality fixed. Verify

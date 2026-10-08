@@ -91,7 +91,7 @@ async def run_with_timeout(run):
 
 @pytest.mark.parametrize("live_server", [["--pixel", "--cols", "160", "--rows", "90",
     "--pixel-codec", "dct", "--fps", "60", "--perf-record", "{trace_dir}",
-    "--decode-ahead", "3"]], indirect=True)
+    "--decode-ahead", "3", "--decode-threads", "2"]], indirect=True)
 def test_seek_burst_reaches_latest_target_and_ignores_old_ready(live_server):
     port, _, clip = live_server
     trace = next((clip.parent / "trace").glob("*.jsonl"))
@@ -120,5 +120,7 @@ def test_seek_burst_reaches_latest_target_and_ignores_old_ready(live_server):
     asyncio.run(run_with_timeout(run))
     records = wait_for_session(trace, previous_sessions)
     assert any(r["type"] == "seek_coalesced" and r["removed"] > 0 for r in records)
+    assert any(r["type"] == "stream" and r["decode_threads"] == 2 and r["decoder_name"]
+               for r in records)
     seeks = [r for r in records if r["type"] == "seek"]
     assert len(seeks) < 20 and seeks[-1]["target"] == 2

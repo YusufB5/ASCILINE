@@ -201,6 +201,24 @@ python -m http.server
 
 ## JavaScript SDK (`asciline-player`)
 
+### Live Rust/Python + DCT support in this checkout
+
+The local SDK now negotiates synchronized playback and the `dct-v1` pixel
+profile. The server selects Python/Rust and RAW/DCT; no engine-specific SDK
+option is required. Older servers without synchronized INIT fields retain the
+legacy path. These changes are in this checkout, not yet an npm release.
+
+Start your server, then open
+`http://localhost:8000/static/examples/sdk-live.html` to test the local SDK.
+It provides play/pause, seek, audio enable and disconnect/reconnect controls.
+When hosting the SDK manually, copy the whole `src/` directory: the player
+imports `live-session.js`. The npm package's existing `src` inclusion covers it.
+
+Live sessions serialize DCT decoding, discard stale seek/reinit completions,
+wait for audio startup (or use a wall clock when audio is unavailable), and
+report playback metrics to servers started with `--perf-record`. Static ASCF
+files use their existing separate playback path.
+
 The official JavaScript SDK ships as the `asciline-player` npm package (MIT license). It provides two complementary APIs: a full-featured `AsciiPlayer` class for programmatic control, and a zero-config `<ascf-player>` HTML element for drop-in embedding — both backed by the same high-performance render engine.
 
 ### Install
@@ -427,6 +445,12 @@ python stream_server.py video.mp4 --engine rust --pixel --cols 750 --no-resoluti
 the default. See [Rust build and test instructions](rust_core/README.md);
 installing the base Python package does not build the native module.
 
+For Rust file playback, `--decode-threads 2` requests two source-decoder threads;
+`--decode-threads 0` requests automatic selection. Omitting the option preserves
+the codec default. This controls source decoding, independently of DCT encoding
+and the `--decode-ahead 3` source queue. Rebuild the native module before using
+the option. Python fallback and webcam input do not support this override.
+
 Live FPS defaults are **30 for ASCII with either engine**, **60 for Rust pixel**,
 and **30 for Python pixel**. Use `--fps N` to override the FPS ceiling separately
 from engine and resolution. For example, `--engine rust --mode 6 --fps 60`
@@ -448,8 +472,9 @@ python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --dct-
 
 The grid rounds up to multiples of 16 for the DCT/YUV420 planes; the server
 prints the actual size. Seek and mode changes restart the predictor with a
-keyframe. Clients without the explicit DCT capability, including the current
-npm SDK, keep receiving raw pixels. Python can encode the same profile with
+keyframe. Clients without the explicit DCT capability, including older
+npm SDK releases, keep receiving raw pixels; this checkout's SDK negotiates DCT.
+Python can encode the same profile with
 `--engine python`; Rust uses the native implementation after rebuilding.
 DCT reduces bandwidth at the cost of image fidelity and extra encode/decode
 work, so raw-pixel FPS does not predict DCT FPS. See the measured limitations

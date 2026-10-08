@@ -24,8 +24,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture(scope="module")
 def live_server(tmp_path_factory, request):
+    render_args = getattr(request, "param", ["--pixel", "--cols", "160", "--rows", "90"])
+    selection = "rust"
+    if "--engine" in render_args:
+        selection = render_args[render_args.index("--engine") + 1]
     try:
-        engine = get_engine("rust")
+        engine = get_engine(selection)
     except RuntimeError as exc:
         pytest.skip(str(exc))
     config = ROOT / "rust_core/runtime.json"
@@ -45,7 +49,6 @@ def live_server(tmp_path_factory, request):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     log = (folder / "server.log").open("w", encoding="utf-8")
-    render_args = getattr(request, "param", ["--pixel", "--cols", "160", "--rows", "90"])
     render_args = [str(folder / "trace") if arg == "{trace_dir}" else arg for arg in render_args]
     process = subprocess.Popen([sys.executable, "-u", "stream_server.py", str(clip),
         "--engine", "rust", *render_args,

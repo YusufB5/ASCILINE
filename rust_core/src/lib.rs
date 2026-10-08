@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 #[pymodule]
 fn _asciline_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("API_VERSION", 1)?;
+    m.add("DECODE_THREADS_SUPPORTED", true)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<decoder::PyVideoDecoder>()?;
     m.add_class::<dct::RustProfileEncoder>()?;

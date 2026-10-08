@@ -16,7 +16,7 @@
     "LICENSE-MIT"
   ],
   "scripts": {
-    "test": "node test/test_sdk_import.js && node test/test_live_player_timing.cjs"
+    "test": "node test/test_sdk_import.js && node test/test_live_player_timing.cjs && node test/test_sdk_live.js"
   },
   "keywords": [
     "ascii",

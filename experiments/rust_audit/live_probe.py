@@ -91,6 +91,7 @@ def own_server(args):
             "--engine", "rust", "--pixel", "--pixel-codec", "dct" if args.dct else "raw",
             "--cols", str(args.cols), "--fps", str(args.fps), "--debug",
             "--decode-ahead", str(args.decode_ahead),
+            *(["--decode-threads", str(args.decode_threads)] if args.decode_threads is not None else []),
             "--no-thumbnails", "--port", str(port),
             *(["--perf-record", str(args.perf_record)] if args.perf_record else [])], cwd=root,
             stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
@@ -124,6 +125,7 @@ if __name__ == "__main__":
     parser.add_argument("--cols", type=int, default=450)
     parser.add_argument("--fps", type=float, default=60)
     parser.add_argument("--decode-ahead", type=int, choices=[0, 2, 3], default=0)
+    parser.add_argument("--decode-threads", type=int, default=None)
     parser.add_argument("--native-binary", type=Path, help="Use a saved DLL in the isolated server for A/B measurements")
     parser.add_argument("--label", help="Alphanumeric label for separate A/B log files")
     parser.add_argument("--perf-record", type=Path, help="Record per-frame diagnostics from the owned server")
