@@ -1,229 +1,108 @@
-# ASCILINE optional Rust engine
+# Optional Rust engine
 
-File decoder, character mapper, adaptive RAW/ZLIB/DELTA/RLE encoder and
-opt-in pixel DCT profile encoder.
-The native module is `_asciline_native`; older `ascii_core` installations
-are not used. The standard Python install and server default stay usable.
+Rust implements source-file decoding through FFmpeg, ASCII mapping, adaptive ASCII encoding and pixel DCT encoding. Python retains FastAPI, audio/thumbnail endpoints and playback sessions. Browser reconstruction stays JavaScript. See [architecture](../ARCHITECTURE.md) and [live usage](../docs/LIVE_STREAMING.md).
 
-## Quick test on this checkout
+## Installation scope
 
-From the repository root, after building:
+`python -m pip install .` installs Python, not a Rust build. This checkout builds `_asciline_native` locally; Windows loader expects `rust_core/target/release/_asciline_native.dll` and records machine settings in `rust_core/runtime.json`.
+
+Use the same Python interpreter for build and server. Windows was verified with Python 3.11 and native version 0.2.0 on 2026-10-08. Python/npm metadata remain 0.1.5. These source changes are not automatically present in a previously published package.
+
+## Windows prerequisites
+
+- Base Python dependencies: `python -m pip install .`.
+- Rust toolchain with Cargo available.
+- Visual Studio x64 C++ Build Tools, including `vswhere` and `vcvars64.bat`.
+- Stable FFmpeg **8.1 shared development** package with `include/`, `lib/`, `bin/`; keep matching shared DLLs after compilation.
+
+Executable-only FFmpeg can run audio extraction but cannot build the native decoder. Nightly headers can expose enum values not handled by locked `ffmpeg-next 8.1.0`. A previously working DLL does not prove a clean build with different headers works.
+
+The validated BtbN package was `n8.1.3-14-g330caae0c1-20261003`, LGPL shared, from [BtbN releases](https://github.com/BtbN/FFmpeg-Builds/releases). Its archive SHA256 was `54f1f8cc5f6db333e8c34f19fb38dcc79d6427b38ecdd1a6dade1664be8018d5`. This identifies the tested archive; latest downloads change. Store local dependencies under ignored `rust_core/.deps/` or supply another root.
+
+## Build and verify
+
+From repository root, replace the example path with the extracted directory directly containing include/lib/bin:
 
 ```powershell
+python rust_core/build.py --ffmpeg-dir "C:/dependencies/ffmpeg-shared"
 python -m asciline.engines --engine rust
-python stream_server.py "C:\path\to\video.mp4" --engine rust --pixel --cols 450 --no-thumbnails
 ```
 
-Open `http://localhost:8000`. Use a local 60 FPS source to test 60 FPS
-playback. `--cols` controls output detail and cost. For a first comparison,
-use 300–450 columns and then increase it.
-
-Automatic grid sizing retains the existing pixel/cell, portrait and row
-performance caps by default. Add `--no-resolution-limit` (alias: `--no-limit`)
-to disable those caps. A 1280x720 source with `--pixel --cols 750` uses 471x265
-by default, or 750x422 with the flag (about 57 MB/s of raw BGR at 60 FPS).
-The flag also applies to ASCII mode, including mode switches; large ASCII
-grids can slow browser character drawing. Explicit `--rows` keeps its previous
-behavior. The native decoder still validates dimensions before allocating
-memory, and the FPS limit is unchanged.
-
-ASCII is also supported:
+The script discovers MSVC, uses release optimization and Cargo.lock, and writes runtime settings only after success. It does not install globally or alter system PATH. Cargo is offline by default; on a machine without cached crates allow fetching:
 
 ```powershell
-python stream_server.py "C:\path\to\video.mp4" --engine rust --mode 6 --cols 160
+python rust_core/build.py --ffmpeg-dir "C:/dependencies/ffmpeg-shared" --online
 ```
 
-The default ceiling is 30 FPS for ASCII with either engine, 60 FPS for Rust
-pixel mode, and 30 FPS for Python pixel mode. Use `--fps 60` to opt into higher
-ASCII FPS or `--fps 30` to lower pixel FPS. This option is independent of engine
-selection and `--no-limit`; an explicit FPS ceiling persists across mode
-switches. Without it, each mode uses its own default. Actual visible FPS
-depends on source, CPU, network, browser drawing and screen refresh.
-Sampling keeps evenly spaced source frames: 59.94 becomes 29.97 under a 30 FPS
-ceiling, and 50 becomes 25. No extra frames are generated for lower-rate sources.
-Rust server sessions disable WebSocket permessage-deflate: compressing the
-raw pixel stream on the event loop can make delivery fall behind real time.
-Adaptive ASCII compression still runs in the engine. Raw pixels use more
-bandwidth (450x253 at 60 FPS is about 20.5 MB/s before protocol overhead).
-Audio and scrub extraction use the native build's FFmpeg runtime, avoiding
-an older unrelated executable on PATH. `ASCILINE_FFMPEG_DIR` takes precedence.
-It does not create extra frames for a 24/30 FPS source. Current yt-dlp
-normalization can produce 30 FPS downloads; use a local original file for
-this comparison. Webcam device indices use the Python/OpenCV engine.
-The live wire format still schedules frames by nominal FPS; use constant-rate
-sources for the first A/V test. The decoder exposes actual PTS for later
-transport work with variable-rate footage.
-
-## Live pixel DCT
-
-Rebuild the native module before enabling the new profile encoder. The root
-demo negotiates `pixel_codec=dct-v1` with `sync=1`; `INIT` field 11 identifies
-the selected pixel transport (`raw` or `dct`). Merely requesting adaptive ASCII
-does not opt a client into DCT. The npm SDK continues receiving raw pixels.
+The engine check should show `engine: rust`, native path, version and null fallback reason. Start a local video:
 
 ```powershell
-python stream_server.py "C:\path\to\video.mp4" --engine rust --pixel --pixel-codec dct --dct-quality 70 --cols 450 --fps 30 --no-thumbnails
+python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --cols 450 --fps 60 --no-thumbnails --decode-ahead 3
 ```
 
-The default remains raw. DCT dimensions round up to multiples of 16. Each
-WebSocket owns a predictor; seek/reinit resets it and starts with a keyframe.
-Packets use playback frame indices even after seeks and source-frame shedding.
-The Python engine supports the same profile. `AsciiStreamServer` accepts
-`pixel_codec="dct", dct_quality=70` alongside `engine`, `fps` and grid settings.
-All DCT sessions disable transport deflate, since profile packets already use
-zlib. Webcam mode remains raw.
+Open `http://localhost:8000/static/examples/sdk-live.html`. The local SDK negotiates sync/DCT; older clients without capabilities receive legacy/raw. `--pixel-codec raw` selects raw transport. [Live settings](../docs/LIVE_STREAMING.md) explain caps, FPS and thread overrides.
 
-Correct reconstruction has automated coverage, including the actual browser
-codec source. Real browser FPS and A/V behavior still need a playback test.
-The first Costa Rica probe at QF 70 / 464x256 averaged about 18 ms for source
-decode plus native DCT, exceeding a 60 FPS budget before network overhead.
-Use 30 FPS at that size initially, or try 320 columns for 60 FPS experiments.
-See `experiments/rust_audit/DCT_INTEGRATION.md` for measurements and reproduction.
+## Runtime discovery and troubleshooting
 
-## Build
+Loader first searches the local release binary, then an installed `_asciline_native`, and validates API version 1. `rust` fails explicitly; `auto` logs a reason and can fall back. Webcam devices keep Python/OpenCV.
 
-Use stable FFmpeg **8.1 shared development** libraries with the locked
-`ffmpeg-next 8.1.0` dependency. Development/nightly headers may introduce enum
-entries the wrapper cannot compile. A working older DLL does not prove that
-a fresh dependency build against the currently installed headers will succeed.
+Windows loader retains DLL-directory handles. `ASCILINE_FFMPEG_DIR`, `FFMPEG_DIR`, build configuration and compatible PATH directories participate in shared-library discovery. Audio executable selection prioritizes ASCILINE_FFMPEG_DIR, FFMPEG_DIR, then native runtime configuration when native playback is active, before PATH. An unrelated older PATH executable can fail on a file the Rust decoder handles.
 
-Validated on Windows with BtbN `n8.1.3-14-g330caae0c1-20261003`, LGPL shared,
-downloaded from the [BtbN releases](https://github.com/BtbN/FFmpeg-Builds/releases).
-The tested archive SHA256 is
-`54f1f8cc5f6db333e8c34f19fb38dcc79d6427b38ecdd1a6dade1664be8018d5`.
-The upstream `latest` asset changes; this checksum identifies the tested
-artifact, not every later download. Store local dependencies under ignored
-`rust_core/.deps/` or supply your own directory. No vendor patches are needed
-for the validated stable build.
+| Symptom | Check/action |
+| --- | --- |
+| Native module not found | Build locally and confirm release DLL |
+| Python version mismatch | Rebuild with server interpreter |
+| DLL import failure | Matching FFmpeg runtime DLLs and paths |
+| Missing include/lib/bin | Shared development package required |
+| Wrapper enum errors | Validated stable headers rather than nightly |
+| Build cannot replace DLL | Close servers/tests loading it and rebuild |
+| Rust video works, audio fails | Recorded FFmpeg path and `/audio` diagnostics |
+| DCT/thread capability unavailable | Rebuild current sources rather than older DLL |
 
-Requirements: base ASCILINE Python dependencies, Cargo, and FFmpeg headers
-and libraries. On Windows, use a **shared development** FFmpeg build with
-`bin/`, `include/`, `lib/`, and Visual Studio x64 C++ Build Tools. A normal
-standalone FFmpeg executable alone is insufficient for native compilation.
+Git contains source/lockfile, not local runtime. Fresh clone, branch changes or deleted build files may require rebuilding. Current Python packaging does not provision native wheels or FFmpeg development files. Current Docker runs Python and does not compile Rust.
 
-```powershell
-python rust_core/build.py --ffmpeg-dir "C:\path\to\shared-ffmpeg"
-```
+## Linux and macOS
 
-The script builds an optimized release module locally, discovers the MSVC
-environment, keeps Cargo.lock fixed, and records local runtime/ABI settings
-in ignored `runtime.json`. It does not install into global Python or change
-the system PATH. By default Cargo is offline; on a new machine with no cached
-dependencies use `--online` to permit dependency downloads.
+Install FFmpeg development libraries, pkg-config metadata, Python dependencies and Cargo, then run `python rust_core/build.py` (or `--online`). These script paths have not been validated in this Windows integration; native build coverage differs from Python platform support.
 
-On Linux/macOS install FFmpeg development libraries and their pkg-config
-metadata, then run `python rust_core/build.py` (add `--online` for an empty
-Cargo cache). Those platforms have not been exercised in this checkout.
-
-Rebuild with the same Python major/minor version that runs the server.
-On Windows, the loader retains DLL search handles. `ASCILINE_FFMPEG_DIR`
-or `FFMPEG_DIR` can override the FFmpeg runtime directory.
-
-## Integration API
-
-### Source decoder concurrency
-
-`stream_server.py --engine rust --decode-threads N` controls source-video
-decoder concurrency, independently of the DCT encoder and decode-ahead queue:
-
-- Omit the flag to preserve the codec's existing default (no thread override).
-- `--decode-threads 2` requests two source-decoder threads.
-- `--decode-threads 0` lets the decoder choose automatically.
-- Accepted range: 0–64. Python fallback and webcam input reject this option.
-
-The Python native adapter accepts `decode_threads=None` or an integer in the
-same range. The option requires a rebuilt DLL; older DLLs produce an explicit
-rebuild error when the override is requested. Server logs and performance
-records include decoder name and configured thread count. A zero value denotes
-automatic selection, not zero actual workers. Codec implementations may adjust
-the requested count.
-
-Keep `--decode-ahead 3` fixed when comparing these settings. Increased source
-concurrency can compete with DCT encoding; do not assume automatic or larger
-counts always improve end-to-end playback. See
-`experiments/rust_audit/DECODER_THREAD_FINDINGS.md` for measurements.
+## Engine API and ownership
 
 ```python
 from asciline.engines import get_engine
-
-engine = get_engine("rust")  # explicit failure if unavailable
-# get_engine("auto"): fallback to Python, with reason in the log
-# get_engine("python"): no native loading
-
+engine = get_engine("rust")
 with engine.decoder("video.mp4", 450, 253, skip_gray=True) as decoder:
     decoder.seek(1.23)
     gray, bgr = next(decoder)
-    print(decoder.position)  # actual decoded PTS, relative to stream start
+    print(decoder.position)  # source PTS relative to stream start
     decoder.resize(320, 180)
-    decoder.set_skip_gray(False)
 ```
 
-The Python adapter contains engine choice and compatibility behavior.
-The server uses public `resize`, `set_skip_gray`, `seek`, `grab`, `release`
-methods. Native decoder access is serialized; decode and encode work release
-the Python GIL. Encoder/mapper inputs are copied to owned Rust buffers
-before the GIL is released, preventing concurrent NumPy mutation races.
+The adapter exposes seek, resize, next/grab, skip-gray and release. Native decoder calls are serialized. Decode/encode release the GIL; encoder inputs are copied to owned Rust buffers first. DCT uses the existing tag-4 format and reconstructed predictor, with integer inverse semantics matching JavaScript. Motion-search SAD uses SSE2 on x86_64 and scalar elsewhere; search/format decisions remain unchanged.
 
-`AsciiStreamServer(..., engine="rust")` also selects the native engine.
-Its optional `fps=60` argument overrides the same FPS policy; omitting it uses
-the mode defaults above. `no_resolution_limit=True` only changes grid sizing.
-The transport and the current web player retain the existing protocol.
+`decode_threads=None` keeps codec default, zero requests auto, 1–64 requests a fixed count. It applies to source decoding separately from DCT/queue. Actual workers are codec-specific. `AsciiStreamServer` supports engine selection but not this override or decode-ahead; use CLI for those.
 
-The root live player additionally requests `sync=1` on its WebSocket. This
-optional extension sends four preroll frames, waits for `playback-ready`,
-and anchors server pacing to the client's actual clock. Seek requests carry
-a `requestId`; `SEEKED:<requestId>:<actual seconds>` separates stale frames
-from the new timeline. Audio starts only after the matching marker and new
-frames arrive. Clients without `sync=1` retain the existing behavior and wire
-frames. This extension has not been ported to the npm SDK.
-
-## Tests and manual checks
+## Tests
 
 ```powershell
-python rust_core/build.py --test --ffmpeg-dir C:\path\to\ffmpeg-shared
-python -m pytest test/test_native_engine.py test/test_native_stream.py test/test_engine_selection.py -q
-python -m pytest test/ -q
+python rust_core/build.py --test --ffmpeg-dir "C:/dependencies/ffmpeg-shared"
+python -m pytest -q -rs test/test_sdk_profile.py test/test_engine_selection.py test/test_native_engine.py test/test_live_profile.py test/test_playback_recording.py test/test_native_stream.py
+npm test
 ```
 
-Native tests skip if the engine is not built; check the reported pass/skip
-counts. Tests generate short local videos. They cover long-GOP seek,
-nonzero stream start, B-frame draining, mixed next/grab, resize, mirror,
-close, validation, mapping, codec keyframes/tolerance, GIL progress, and
-the real CLI/WebSocket path at 60 FPS with seek/pause/reinit.
+On 2026-10-08, the targeted Python command passed 66 tests with no skips after the Windows build. Coverage includes repeated seeks, B-frame drain, resize/mirror, reconstruction, actual server control and SDK connections. Rust's unit test compares SIMD SAD to scalar. Read pass/skip counts: missing native engine skips dependent tests. Node/synthetic tests complement browser observation, not all-device FPS or physical A/V skew.
 
-For the user playback test:
+[Measured performance and recording](../docs/PERFORMANCE.md).
 
-1. Play a local 60 FPS video with sound for several minutes.
-2. Seek forward and backward, pause/resume, and switch ASCII/pixel modes.
-3. Repeat muted and with a 24/30 FPS video.
-4. Compare `--engine python` and `--engine rust` at the same dimensions.
+## Files
 
-Automated WebSocket tests establish delivered frames and timing; a real
-browser/audio session is needed to assess visible smoothness and A/V sync.
-
-## Layout
-
-```text
-rust_core/
-  Cargo.toml, Cargo.lock   reproducible dependency definition
-  build.py                local release build
-  src/lib.rs              versioned Python API
-  src/decoder.rs          FFmpeg receive/feed/drain, PTS and seek
-  src/ascii.rs            character and color mapping
-  src/codec.rs            existing adaptive wire format
-  target/                 ignored build artifacts
-  runtime.json            ignored machine-specific runtime configuration
-asciline/engines.py        Python/Rust adapter and module loader
-```
-
-`src/dct.rs` is now compiled and exports `ProfileEncoder`. Its inverse transform
-uses floor division to match JavaScript, validates shape/options, owns inputs
-before releasing the GIL, and maintains its own reconstructed reference planes.
-
-Color conversion uses exact integer truncation of already clamped samples.
-Motion-search SAD uses SSE2 on x86_64, with a scalar implementation on other
-architectures. It preserves search radius, candidate order, zero-motion tie
-preference and the encoded format. Native tests cover unaligned loads, extreme
-pixel values and bounded SAD cutoffs; Python/JS contract tests validate the
-complete encoder. Measurements are in
-[`PERFORMANCE_FINDINGS.md`](../experiments/rust_audit/PERFORMANCE_FINDINGS.md).
+| File | Responsibility |
+| --- | --- |
+| `build.py` | Release build and runtime metadata |
+| `Cargo.toml`, `Cargo.lock` | Native dependencies |
+| `src/lib.rs` | Python API/version/capabilities |
+| `src/decoder.rs` | FFmpeg decode/drain, seek/PTS, resize and threads |
+| `src/ascii.rs` | Character/color mapping |
+| `src/codec.rs` | Adaptive ASCII encoding |
+| `src/dct.rs` | DCT, prediction/reconstruction and motion search |
+| `target/`, `.deps/`, `runtime.json` | Ignored machine-local files |
+| `../asciline/engines.py` | Python/native selection, loader and adapter |

@@ -1,147 +1,103 @@
-# ASCILINE Master Architecture & Technical Specification
+# ASCILINE architecture
 
-This document serves as the absolute architectural source of truth for the **ASCILINE** project. It details the core philosophy, system ecosystem, wire protocols, rendering pipelines, strict code governance, and compiler internals.
+This describes the source checkout. Commands are in the [live guide](docs/LIVE_STREAMING.md), [SDK guide](docs/SDK.md) and [Rust build guide](rust_core/README.md). Historical benchmark notes describe particular experiments, not current defaults.
 
----
+## 0. Philosophy
 
-## 0. Core Philosophy & Manifest (Amacı ve Felsefesi)
+ASCILINE turns moving images into programmable characters and color cells. Developers work with fonts, palettes, cells, selection layers and time-based effects. Pixel mode retains direct image-grid access through Canvas ImageData. Rust and DCT make these representations practical to produce and transport.
 
-> **"ASCILINE rejects traditional black-box video tags (`<video>`). In return, it is a representation engine designed to provide total typographic manipulation, algorithmic interactivity, and raw character control."**
->
-> To casual users, ASCILINE may simply appear as a "fast ASCII video player". However, its true architectural purpose is far deeper:
-> 1. **De-commoditizing Video:** Traditional video in the browser is an opaque texture trapped inside an untouchable `<video>` element. ASCILINE frees video into discrete, addressable text cells and data streams.
-> 2. **Typographic & Algorithmic Manipulation:** Because every frame is decomposed into text characters and color matrices, developers can apply real-time font substitutions, text-selection layers, shader-like cellular effects, matrix glitching, and DOM-level interactions that are fundamentally impossible with standard MP4/WebM video players.
-> 3. **The Pixel Mode Contrast:** Even in Pixel Mode (`--pixel`), ASCILINE bypasses media decoders in favor of direct HTML5 Canvas memory buffers (`putImageData`), treating the screen as an open canvas rather than a locked media stream.
+The purpose is creative and algorithmic control through this representation. Standard video can also be processed on Canvas; claims of distinctive control should identify the concrete advantage of characters/cells. Performance claims require source, grid, quality and runtime conditions. The live player draws without an HTML video element, while source media uses a server decoder, DCT reconstruction uses JavaScript and audio uses a browser media element. Canvas acceleration depends on the browser/platform; zero GPU is not a verified guarantee.
 
----
+## 1. Components and governance
 
-## 1. System Ecosystem & Strict Governance
+| Component | Source | Responsibility |
+| --- | --- | --- |
+| Server | `stream_server.py` | FastAPI/endpoints, source queue configuration, socket session and pacing |
+| Engine adapter | `asciline/engines.py` | Python/Rust/auto and native loading |
+| Native engine | `rust_core/src/` | File decode, mapping and encoding |
+| Source queue | `asciline/source_queue.py` | Bounded worker owning decoder reads |
+| Pixel profile | `asciline/pixel_profile.py` | Session predictor, alignment and live indices |
+| Playback | `asciline/playback.py`, `asciline/commands.py` | FPS sampling and pending seek coalescing |
+| Runtime/diagnostics | `asciline/media_runtime.py`, `asciline/perf_trace.py` | FFmpeg path and JSONL timing |
+| Root client | `app.js`, `codec.js`, `index.html` | Standalone showcase session/renderer |
+| SDK | `src/asciline-player.js`, `src/live-session.js` | Reusable player and live transport/timeline |
+| Component | `src/ascf-element.js` | Packaged HTML wrapper |
+| Static | `compiler.py`, `static_player/` | Compile, reader/player and browser Studio |
 
-ASCILINE is a high-performance, real-time ASCII and Pixel video rendering engine. The ecosystem is divided into three execution environments:
-1. **Live Streaming (Server-Client):** A FastAPI/WebSocket backend (stream_server.py) streaming encoded frames to a JS frontend.
-2. **NPM SDK (sciline-player):** An encapsulated, zero-dependency library designed for modern web apps (React, Vue, Vite).
-3. **Offline Static Player (static_player/ & compiler.py):** A pre-compiled, serverless .ascf file format player for zero-latency, offline playback.
+**Golden Master governance:** root `app.js`, `codec.js` and `index.html` are the standalone showcase reference. Refactoring or migrating this client into the SDK requires explicit owner approval. Protocol parity does not imply the root UI has been replaced by the SDK.
 
-> ⚠️ **STRICT GOLDEN MASTER GOVERNANCE RULE (DO NOT TOUCH):**
-> * pp.js, codec.js, and index.html located in the root repository are the **Golden Master**.
-> * The showcase website and standalone engine rely on this core.
-> * **NO AI OR DEVELOPER MAY REFACTOR, MIGRATE, OR TOUCH THE GOLDEN MASTER TOWARDS THE SDK WITHOUT EXPLICIT USER APPROVAL.**
-> * Migration or merging from Golden Master to SDK will only happen when the SDK is 100% perfected, verified, and explicitly authorized by the project owner.
+## 2. Live pipeline
 
----
+```text
+Source file
+  -> Python/OpenCV or Rust/FFmpeg decode + resize + BGR conversion
+  -> optional bounded source queue (Rust pixel files only)
+  -> ASCII map/adaptive encode OR raw BGR OR pixel DCT
+  -> session WebSocket packets
+  -> ordered JavaScript reconstruction
+  -> Canvas text or BGR-to-RGBA ImageData
 
-## 2. Server Management & Rendering Modes (stream_server.py)
+Source audio -> /audio FFmpeg process -> audio element -> playback clock
+```
 
-The Python backend extracts video (FFmpeg/OpenCV), performs real-time quantization, encodes payloads, and streams them over WebSocket.
+Python is default; Rust optional; auto permits fallback. Webcam uses OpenCV. Source-file compression, ASCILINE encoding and browser reconstruction have different costs. Native source PTS is exposed, but live packets currently schedule by nominal effective FPS; constant-rate sources are the validated baseline.
 
-### 2.1 Starting the Server
-`ash
-# ASCII Mode (Modes 1 to 6)
-python stream_server.py <source> --mode <1-6> --host 0.0.0.0 --port 8000
+Mode 1 sends text; 2–6 use character/RGB cells with quantized values. Pixel mode draws BGR through ImageData, without glyphs, and defaults to raw. ASCII ceiling is 30 FPS, Rust pixel 60, Python pixel 30. Explicit FPS samples without interpolation. Automatic dimensions are capped; DCT aligns upward to multiples of 16.
 
-# Pixel Mode (Dedicated Flag)
-python stream_server.py <source> --pixel --host 0.0.0.0 --port 8000
-`
+## 3. Handshake and packets
 
-### 2.2 Deep Dive into Rendering Modes
+### Capabilities
 
-ASCILINE strictly separates **ASCII Modes (1 to 6)** from **Pixel Mode (--pixel)**:
+Adaptive ASCII requests `codec=adaptive`; sync requests `sync=1`. Pixel DCT additionally requests `pixel_codec=dct-v1`, with server codec dct and active pixel file input. Otherwise the supported legacy/raw path is used. Current root client/local SDK advertise DCT; older published clients may stay raw.
 
-#### 🅰️ ASCII Modes (--mode 1 to 6)
-All ASCII modes render characters into an ASCII grid using font glyphs. The mode determines **color depth / quantization**:
-* **Mode 1 (B&W / Monochrome String Stream):**
-  * **Payload:** Plain UTF-8 Text WebSocket frame (<frame_index>\n<line_1>\n<line_2>...).
-  * **Client Rendering:** Direct DOM <pre> or single-color Canvas illText(). Zero color memory overhead.
-* **Modes 2 to 6 (Color Quantized Binary ASCII Streams):**
-  * **Mode 2:** 64 colors (6-bit color quantization).
-  * **Mode 3:** 512 colors (5-bit quantization).
-  * **Mode 4:** 32,000 colors (3-bit quantization).
-  * **Mode 5:** 262,000 colors (2-bit quantization).
-  * **Mode 6:** 16 Million Colors (Full 24-bit True Color / Ultra).
-  * **Cell Structure (Modes 2-6):** Packed as **4 bytes per cell: [ char_byte (uint8), R (uint8), G (uint8), B (uint8) ]**.
-  * **Client Rendering:** Decoded via codec.js and rendered character-by-character using HTML5 Canvas 2D CPU ctx.fillText().
+### INIT
 
----
+```text
+INIT:<fps>:<mode>:<cols>:<rows>:<pixel>:<queue>:<duration>:<offset>:<webcam>[:<syncId>[:<pixelCodec>]]
+```
 
-#### 🔲 Pixel Mode (--pixel)
-Pixel mode is **NOT an ASCII mode**. It completely replaces character rendering with a direct hardware-accelerated video canvas:
-* **Activation:** Triggered via the --pixel flag (automatically sets underlying mode to 6 True Color).
-* **Payload:** Pure raw binary pixel stream.
-* **Frame Structure:** [ 4 bytes frame_index BE uint32 ] + [ rows * cols * 3 bytes (BGR) ].
-* **Client Rendering (HTML5 Canvas Optimization):** **NO illText() OR FONT GLYPHS ARE USED.**
-  * The browser receives raw BGR bytes, converts them into an RGBA Uint8ClampedArray (TypedArray), and pushes them directly to the GPU via HTML5 Canvas **ctx.putImageData()**.
-  * This bypasses all CPU font rendering overhead, achieving a rock-solid 60 FPS even at high resolutions.
+Pixel/webcam are 0/1; offset is seconds. Sync ID is added for synchronized files. Profile-capable clients get raw/dct suffix. New INIT rebuilds dimensions and changes the client's timeline epoch.
 
----
+| Representation | Packet |
+| --- | --- |
+| Text | `<frameIndex>\n<lines>` |
+| Legacy ASCII color | BE uint32 index + character/RGB cells |
+| Live raw pixels | BE uint32 index + BGR cells |
+| Adaptive ASCII | BE uint32 index + uint8 tag + payload |
+| DCT pixels | BE uint32 playback index + tag 4 + zlib profile |
 
-## 3. The Wire Protocol & Handshake
+Tags 0/1/2/3 are RAW/ZLIB/DELTA/RLE_FULL. Tag 4 is the lossy pixel profile. Untagged live RAW pixels differ from adaptive packets; decode according to negotiated representation.
 
-### 3.1 The INIT Handshake Frame
-Immediately upon WebSocket connection, the server sends a text control frame before any video frames:
-`	ext
-INIT:<effective_fps>:<render_mode>:<cols>:<rows>:<pixel_mode>:<queue_index>:<duration>:<0>:<is_webcam>
-`
-* **Example:** INIT:30.0:6:240:135:1:0:45.120:0:0 (Here pixel_mode=1 indicates Pixel Mode is active).
-* **Purpose:** The client immediately:
-  1. Sizes the <canvas> buffer dimensions (cols x ows).
-  2. Sets up audio synchronization (/audio endpoint or embedded duration).
-  3. Instantiates the correct decoder pipeline:
-     * Mode 1: Plain text string splitter.
-     * Modes 2-6: Adaptive ASCII binary decoder (makeDecoder()).
-     * Pixel Mode: Direct ImageData BGR-to-RGBA frame buffer.
+### DCT internals
 
-### 3.2 Binary Frame Envelope (Modes 2-6 & Adaptive Codec)
-When using the adaptive codec (?codec=adaptive), binary ASCII frames follow this envelope:
-`	ext
-[ 4 bytes (UInt32 Big Endian) Frame Index ] + [ 1 byte Codec Tag ] + [ Payload ]
-`
+BGR becomes full-range Y/Cb/Cr with 4:2:0 chroma. Planes use 8x8 blocks. Keyframes predict a constant; predictive frames use previous reconstructed planes. Luma searches integer motion within radius three; chroma uses its colocated previous block. Residuals are transformed and quantized by quality tables/dead-zone handling, zigzag/run-length coded with differential DC values. Skipped predictive blocks reuse reconstruction. Zlib compresses the payload; keyframes carry quality/dimensions.
 
----
+Encoder reconstruction is the next predictor. Original source planes would diverge from decoder state. Python/Rust/JavaScript agreement is checked by packets and reconstructed BGR. Normal keyframe interval is 48 encoded frames. Live indices are rewritten to playback indices: encoder counters are not media clocks. Every socket owns its predictor, reset on seek/reinit.
 
-## 4. Audio & Video Synchronization (pp.js vs. SDK)
+## 4. Synchronization and cancellation
 
-Synchronization between video frames and audio is the most critical component of ASCILINE.
+Sync sends four preroll frames and waits for matching playback-ready. Client waits for audio playing or uses a wall-clock fallback. Server pacing anchors to the client clock. Clean short EOF can start with fewer preroll frames.
 
-### 4.1 The Golden Master Engine (pp.js)
-* **Master Clock:** pp.js uses udioEl.currentTime as the absolute source of truth (getMasterClock()).
-* **Render Loop:** Uses equestAnimationFrame to poll the rameBuffer. It displays the frame whose timestamp most closely matches the Master Clock.
-* **Fallback:** If unmuted audio is blocked by the browser, pp.js seamlessly falls back to a wall-clock implementation (performance.now()).
+```text
+Client -> {type: seek, time: seconds, requestId: newId}
+Server -> SEEKED:<requestId>:<actual seconds>
+Server -> new keyframe/timeline packets
+Client -> {type: playback-ready, requestId: newId, time: clock}
+```
 
-### 4.2 The NPM SDK (src/asciline-player.js)
-The SDK adapts the Golden Master logic into a portable, class-based architecture (AsciiPlayer).
-* **State Isolation:** The SDK strictly decouples playback state (PLAYING, PAUSED) from the audio element's volume state.
-* **Clock Continuity:** When resuming a paused video, the SDK forces udioEl.play() even if the player is muted. This ensures the master clock ticks forward, preventing the render loop from freezing.
+Seek stops/joins the source worker before repositioning, resets prediction/pacing/backlog, and starts a segment. Pending seeks are coalesced to latest target. This does not cancel a seek already executing inside FFmpeg; decoder access remains serialized.
 
----
+LiveSession serializes decoding and discards older-epoch completions. Reinit creates a decoder after INIT. Resume re-seeks to align audio/frames. Dispose cancels startup/render/reports and socket handlers. Draw-late frames can be discarded after reconstruction; predictive packets still require ordered decoding. Source catch-up happens before ordered encoding.
 
-## 5. The Compiler & Static Player
+Source queue bounds prepared/in-progress frames plus one consumer frame. It contains no predictors or encoded packets. Source work overlaps encode; consumer source timing becomes queue wait. FFmpeg threads control source decoding separately from queue capacity and DCT.
 
-ASCILINE is not just a live streaming engine; it can compile videos into a proprietary offline format.
+## 5. Static ASCF and validation
 
-### 5.1 The Compiler (compiler.py)
-Pre-processes a video and compiles it into an **ASCILINE Compiled File (.ascf)**.
-* Runs the same encoding pipeline as stream_server.py but writes the binary output to disk instead of a WebSocket.
-* **File Structure of .ascf:**
-  1. A JSON Header (Metadata, dimensions, fps) length-prefixed.
-  2. The embedded Audio Track (base64 or raw binary).
-  3. The sequentially packed Binary Video Frames, each prefixed with a **4-byte length header** (so the static player can chunk the ArrayBuffer linearly, unlike WebSockets which natively chunk frames).
+Current compiler output has an 18-byte big-endian header: ASC2 magic, float32 FPS, uint8 mode, uint8 pixel, uint16 columns/rows, uint32 total frames. Packets follow with BE uint32 length prefixes. Total frames are patched at byte offset 14. Legacy ASCF uses a shorter header. Audio is a paired file, not embedded; the header is binary, not JSON.
 
-### 5.2 Codec Tags & Streaming vs. Compiler Differences
-ASCILINE uses 1-byte tags to identify frame payload encodings:
-* TAG_RAW (0): Uncompressed frame payload.
-* TAG_ZLIB (1): Zlib compressed payload (High compression, moderate CPU).
-* TAG_DELTA (2): Delta encoded (Transmits only changed pixels/characters since the last frame).
-* TAG_RLE_FULL (3): Run-Length Encoded.
-* TAG_PROFILE (4): **Lossy DCT (Discrete Cosine Transform) Profile.**
+Static pixel packets use the compiler's tagged path, unlike untagged live RAW pixels. `--profile` enables pixel tag 4. The compiler still uses Python. Browser Studio encodes supported RAW/ZLIB/DELTA and can play other supported tags. Static playback needs no ASCILINE backend, but still has file/loading/buffer/render costs; zero latency and near-zero memory are not guarantees.
 
-> **CRITICAL ARCHITECTURAL DISTINCTION:**
-> * **Live Streaming (stream_server.py):** ASCII uses **Tags 0, 1, 2, 3**. Pixel defaults to raw BGR; `--pixel-codec dct` enables **Tag 4** only for clients negotiating `pixel_codec=dct-v1` and `sync=1`. Each session owns its predictor, starts with a keyframe after seek/reinit, and uses playback indices in packet headers. Python and Rust encoders share the existing profile format. DCT encode/decode cost must be measured separately from raw-pixel performance.
-> * **Offline Compiler (compiler.py):** Continues supporting the opt-in **Tag 4 (TAG_PROFILE)** pixel profile for `.ascf` files.
-
-### 5.3 The Static Player (static_player/)
-A specialized HTML/JS client designed to load and play .ascf files locally.
-* **Zero Latency:** Since the file is entirely in memory (ArrayBuffer), there is no network jitter.
-* **Self-Contained:** It reads the .ascf binary, mounts the audio, strips the 4-byte length prefixes to emulate WebSocket packet boundaries, and uses the exact same codec.js decoding logic (inflate) to render frames.
+See [validation](docs/README.md#scope-of-validation) and [measurements](docs/PERFORMANCE.md). Windows native build, automated controls/protocol and owner playback are verified. Native Linux/macOS, broad device/codec coverage and multi-client capacity need separate measurements. LLM directions remain research ideas, not shipped semantic understanding.
 
 ---
 
