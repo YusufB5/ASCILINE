@@ -642,7 +642,6 @@ Quick fixes for the most common issues. Full protocol/technical details will liv
 Live, browser-based showcase across multiple rendering modes: **[asciline.dev](https://www.asciline.dev)**
 
 ## Star History
-## Star History
 
 <a href="https://www.star-history.com/?repos=yusufb5%2Fasciline&type=date&legend=top-left">
  <picture>
