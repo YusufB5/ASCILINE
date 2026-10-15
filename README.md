@@ -37,6 +37,7 @@
 - [Zero-Dependency Static Web Player](#zero-dependency-static-web-player)
 - [JavaScript SDK (asciline-player)](#javascript-sdk-asciline-player)
 - [Installation](#installation)
+  - [Optional: Rust engine + live pixel DCT](#optional-rust-engine--live-pixel-dct-preview-windows-tested)
 - [Running with Docker](#running-with-docker)
 - [Customization](#customization)
 - [Troubleshooting](#troubleshooting)
@@ -59,15 +60,16 @@
 
 - **Cross-platform**: Windows, macOS, Linux.
 - **Real-time ASCII and pixel streaming**: low-latency video-to-text conversion; pixel mode replaces characters with colored blocks, approaching 360p quality.
-- **HTML5 Canvas rendering**, tuned for 24–30 FPS playback. Higher-FPS sources are automatically decimated for stability.
+- **HTML5 Canvas rendering**, tuned for 24–30 FPS playback (up to 60 FPS with the Rust engine in pixel mode). Higher-FPS sources are automatically decimated for stability.
 - **Master clock sync**: the audio track is the absolute time reference, keeping A/V synchronized.
 - **Low-overhead binary protocol**: frames are streamed as raw `Uint8Array` straight to the canvas.
+- **Compressed live pixel mode (DCT) + optional Rust engine**: an opt-in lossy codec streams pixel mode at roughly 0.1 MB/s instead of ~20 MB/s; the optional Rust engine raises pixel mode to 60 FPS. [Details](#optional-rust-engine--live-pixel-dct-preview-windows-tested)
 - **Multiple color modes**: from black & white up to 16M-color high fidelity.
 - **Flexible video management**: JSON playlists (per-video mode & volume), folder-based auto-queuing, single-file mode, infinite loop — all via CLI flags.
 
 ## Architecture
 
-1. **Backend (Python/FastAPI)**: decodes video via OpenCV, maps pixels to ASCII via NumPy, streams binary frames.
+1. **Backend (Python/FastAPI)**: decodes video via OpenCV (or the optional Rust/FFmpeg engine), maps pixels to ASCII or pixel cells, and streams binary frames (optionally DCT-compressed in pixel mode).
 2. **Frontend (vanilla JS)**: receives binary frames over WebSocket, manages a jitter buffer, renders to a canvas grid.
 3. **Communication**: a custom `INIT` handshake negotiates resolution/FPS, followed by the binary frame stream.
 
@@ -79,6 +81,8 @@ ASCILINE/
 ├── ascii_video_player2.py       # Core VideoDecoder, AsciiMapper & standalone terminal player
 ├── codec.py                     # Master Python encoder (RAW/ZLIB/DELTA/RLE/DCT)
 ├── codec.js                     # Root JS decoder (Optimized for Live WebSocket streaming)
+├── 📁 asciline/                 # Engine selection (Python/Rust/auto), source queue, live DCT session, playback timing
+├── 📁 rust_core/                # Optional Rust engine: FFmpeg decode, ASCII mapping, DCT encoder + build script
 │
 # --- 2. Live Streaming Web Client ---
 ├── index.html                   # Web client UI for the live streaming server
@@ -99,15 +103,21 @@ ASCILINE/
 ├── stream_server.py             # FastAPI WebSocket server for real-time video streaming
 ├── ytdl.py                      # yt-dlp integration for dynamic YouTube/URL fetching
 │
-# --- 5. Development & Testing ---
-├── 📁 experiments/              # Codec benchmarks, test vectors & experimental scripts
-├── 📁 test/                     # E2E tests, unit tests & backpressure validation
+# --- 5. JavaScript SDK & Examples ---
+├── 📁 src/                      # asciline-player SDK: AsciiPlayer, LiveSession, <ascf-player> element
+├── 📁 examples/                 # SDK quickstarts (HTML, React) and live SDK demo
 │
-# --- 6. CLI Assets & Cache ---
+# --- 6. Development, Testing & Docs ---
+├── 📁 experiments/              # Codec benchmarks, test vectors & experimental scripts (rust_audit/: Rust/DCT evidence)
+├── 📁 test/                     # E2E tests, unit tests & backpressure validation
+├── 📁 docs/                     # Live streaming, SDK and performance guides
+├── ARCHITECTURE.md              # Pipeline, protocol and DCT internals
+│
+# --- 7. CLI Assets & Cache ---
 ├── logo.py                      # ASCII branding banner displayed on startup
 ├── 📁 videos/                   # Auto-managed local cache directory for downloaded media
 │
-# --- 7. Configuration & Infrastructure ---
+# --- 8. Configuration & Infrastructure ---
 ├── playlist.json                # Playback queue and per-video overrides
 ├── Dockerfile                   # Docker container configuration
 ├── docker-compose.yml           # Multi-service Docker setup
@@ -202,6 +212,8 @@ python -m http.server
 ## JavaScript SDK (`asciline-player`)
 
 The official JavaScript SDK ships as the `asciline-player` npm package (MIT license). It provides two complementary APIs: a full-featured `AsciiPlayer` class for programmatic control, and a zero-config `<ascf-player>` HTML element for drop-in embedding — both backed by the same high-performance render engine.
+
+> **Live DCT in the SDK:** the SDK in this repository (`src/`) negotiates synchronized playback and live pixel DCT automatically; no extra option is needed. The published npm release (0.1.5) predates this and keeps receiving raw pixels until the next release. When self-hosting the SDK, copy the whole `src/` folder (`asciline-player.js` imports `live-session.js`). Try it with `examples/sdk-live.html`; details in [docs/SDK.md](docs/SDK.md).
 
 ### Install
 
@@ -445,18 +457,40 @@ Open `http://localhost:8000` in your browser.
 
 Python remains the default engine. An optional Rust engine (FFmpeg decoding, character mapping, native encoding) and an opt-in lossy DCT transport let **pixel mode stream live at up to 60 FPS** while sending a fraction of the raw pixel data.
 
+Live DCT is not tied to Rust: `--pixel-codec dct` also works with the default Python engine (same protocol and decoder, 30 FPS default). DCT applies to pixel-mode file playback; ASCII modes and webcam input keep their existing transports.
+
 ```bash
+# Python engine (default, no build): pixel mode with live DCT
+python stream_server.py video.mp4 --pixel --pixel-codec dct --cols 320
+
+# Rust engine: build once (Cargo + FFmpeg 8.1 shared dev package), then check it loads
 python rust_core/build.py --ffmpeg-dir "C:/path/to/ffmpeg-shared"
-python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --dct-quality 70 --cols 450 --fps 60 --decode-ahead 3
+python -m asciline.engines --engine rust
+
+# Rust engine: pixel mode with live DCT at 60 FPS
+python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --cols 450 --fps 60 --decode-ahead 3
+
+# Use Rust when it is available, otherwise fall back to Python
+python stream_server.py video.mp4 --engine auto --pixel --pixel-codec dct
 ```
 
-Measured on one Windows machine with one client, 59.94 FPS source, 464×256 coded grid, quality 70:
+| Flag | Default | What it does |
+| :--- | :--- | :--- |
+| `--engine python\|rust\|auto` | `python` | Decoder/encoder engine; `auto` falls back to Python if Rust is not built |
+| `--pixel-codec raw\|dct` | `raw` | Pixel transport; `dct` is lossy and much smaller |
+| `--dct-quality 1-100` | `70` | Lower is smaller and lossier; 100 is still lossy |
+| `--fps N` | ASCII 30, Python pixel 30, Rust pixel 60 | FPS ceiling (frames are sampled, never interpolated) |
+| `--decode-ahead 0\|2\|3` | `0` | Rust pixel only: decode the next frames while encoding |
+
+The Python DCT encoder is slower: on the test machine it needs about 24 ms per frame at `--cols 320` (fits 30 FPS) but about 43 ms at `--cols 450`, so use Rust for larger grids. All flags are listed in [docs/LIVE_STREAMING.md](docs/LIVE_STREAMING.md).
+
+Rust engine, measured on one Windows machine with one client, 59.94 FPS source, 464×256 coded grid, quality 70:
 
 - **~60 FPS** delivered in live playback, with ~7 ms average frame production on the server and ~2 ms DCT decode in the browser.
 - **About 100–250× less bandwidth than raw pixel mode** on typical scenes (≈20 MB/s raw → ≈0.1 MB/s); high-motion scenes compress less (≈50×).
 - **Not a replacement for standard codecs:** in a small pilot, realtime VP9/AV1 reached the same image quality at half the bitrate or less. ASCILINE's goal is a programmable character/pixel representation, not beating H.264/VP9/AV1 on compression.
 
-Build requirements: [rust_core/README.md](rust_core/README.md) · flags and tuning: [docs/LIVE_STREAMING.md](docs/LIVE_STREAMING.md) · methods and results: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Linux/macOS native builds and multi-client capacity are not validated yet; Docker images do not build Rust.
+Build requirements: [rust_core/README.md](rust_core/README.md) · flags and tuning: [docs/LIVE_STREAMING.md](docs/LIVE_STREAMING.md) · methods and results: [docs/PERFORMANCE.md](docs/PERFORMANCE.md) · codec comparison with images: [CODEC_BENCHMARK.md](experiments/rust_audit/CODEC_BENCHMARK.md). Linux/macOS native builds and multi-client capacity are not validated yet; Docker images do not build Rust.
 
 ### Player controls
 
