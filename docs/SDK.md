@@ -115,7 +115,7 @@ Static playback uses its existing reader path, independently of `LiveSession`. R
 
 Use `ws="ws://localhost:8000/ws"` instead of `src` for live. Attributes are `src`, `audio`, `ws`, `autoplay`, `loop`, `muted`. Events bubble with `ascf-` prefix such as `ascf-timeupdate`. Set source attributes before attaching: the current attribute handler does not implement runtime source replacement. Detach disposes the player.
 
-The root showcase, packaged SDK and `demo/ascf-player.js` prototype are separate clients. The component documented here is `src/ascf-element.js`.
+The root showcase and packaged SDK are separate clients. The component documented here is `src/ascf-element.js`.
 
 ## Verify and package
 

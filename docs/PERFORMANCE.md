@@ -9,17 +9,15 @@ ASCILINE provides a custom representation pipeline: source video to programmable
 | Rust DCT conversion + SIMD motion search | Three identical 180-frame windows: mean 10.78–13.91 ms became 5.41–7.60 ms | About 1.83–1.99x faster encode; matched packet/reconstruction hashes |
 | Full-video delivery after optimization | Mean 52.37 to 58.88 FPS; source-index skips 449 to 61 | Server/receiver improvement on a 60-second clip, not browser render FPS |
 | Source-stage profiling | Codec receive/send about 83% of source-call time; scale/conversion about 15% | Dominant source cost was decoding; 83% is neither a speedup nor total-pipeline share |
-| Bounded decode-ahead | Owner's first segments: 320/1845 over budget without queue, 19/2742 with depth 3 | Fewer production overruns in separate runs with differing scene coverage |
+| Bounded decode-ahead | Maintainer's first segments: 320/1845 over budget without queue, 19/2742 with depth 3 | Fewer production overruns in separate runs with differing scene coverage |
 | Decoder threads | Matched 563-frame scene: production mean 7.147 ms default, 8.123 ms two threads, 7.691 ms auto | Source work faster, encode slower; no demonstrated average end-to-end latency win |
 
 Historical methods/results:
 
 - [DCT optimization](../experiments/rust_audit/PERFORMANCE_FINDINGS.md).
-- [Source stages](../experiments/rust_audit/SOURCE_STAGE_FINDINGS.md).
-- [Decoder concurrency](../experiments/rust_audit/DECODER_THREAD_FINDINGS.md).
 - [Standard-codec pilot](../experiments/rust_audit/CODEC_BENCHMARK.md).
 
-These measurements have differing dates, runtimes and methods; do not pool them into a headline speedup. Owner decode-ahead counts above are reported terminal summaries, not controlled identical-scene repetitions. Over-budget production need not mean a visible dropped frame.
+These measurements have differing dates, runtimes and methods; do not pool them into a headline speedup. Maintainer decode-ahead counts above are reported terminal summaries, not controlled identical-scene repetitions. Over-budget production need not mean a visible dropped frame.
 
 At 60 FPS the budget is about 16.67 ms. Without queue, source decode/resize and encoding are sequential. With queue, source work overlaps encoding; consumer queue wait and encode form the critical path. Adding worker source time to production would double-count overlap.
 
@@ -27,9 +25,21 @@ At 60 FPS the budget is about 16.67 ms. Without queue, source decode/resize and 
 
 RAW live pixels send three BGR bytes per cell plus a four-byte frame index. At 450x253 and 60 FPS pixel payload is about 20.5 MB/s (164 Mbit/s). At coded 464x256 the same raw reference is about 21.4 MB/s at 60 FPS. This describes representation bytes, not MP4 bitrate.
 
+In a live Rust/DCT Q70 session on the 59.94 FPS Costa Rica clip (464x256, `--decode-ahead 3`), the server's `--debug` reports showed about 20.9 MB/s raw versus 90–150 KB/s on the wire, i.e. 140–219x less payload, while sending 57–61 FPS with no late drops or decode errors on the client. That excerpt covers a calm opening section; in the codec pilot below, Q70 ranged from 168x (calm) down to 47x (high motion) against the same raw reference.
+
 The three-window software pilot measured ASCILINE Q70 at 1.915 Mbit/s aggregate payload, RGB PSNR 35.37 dB and RGB SSIM 0.9356. All encoders received the same 464x256 predecoded BGR frames at 60000/1001 FPS: 540 unique frames. Audio and network overhead were excluded. Raw-to-DCT savings describe lossy coding of that source at that grid, not universal bitrate or equal-quality efficiency.
 
 The chosen VP9/AV1 realtime presets produced higher PSNR/SSIM at roughly half the payload in this pilot. H.264 used OpenH264, not x264. Hardware playback, energy and broad content were not measured. Use this evidence to quantify representation costs; it does not establish a standard-codec advantage for ASCILINE.
+
+Equal-rate view of the same sweep: PSNR difference of each standard encoder relative to ASCILINE Q70, interpolated in log-rate between its measured points at ASCILINE's actual rate (positive = standard encoder better).
+
+| Window | ASCILINE Q70 | OpenH264 | VP9 RT5 | AV1 RT8 |
+| --- | --- | ---: | ---: | ---: |
+| 5s | 1.079 Mbit/s, 37.72 dB | n/a (encoder undershot) | +1.98 dB | +0.92 dB |
+| 18s | 3.645 Mbit/s, 34.75 dB | +2.71 dB | +3.71 dB | +2.55 dB |
+| 30s | 1.020 Mbit/s, 34.36 dB | +0.00 dB | +2.81 dB | +2.63 dB |
+
+At their lowest tested rate (about half of ASCILINE's), VP9 and AV1 already matched or exceeded ASCILINE Q70 PSNR in every window, so their equal-quality rate is half or less; the pilot does not resolve how much less.
 
 ## Record what you watch
 
@@ -43,7 +53,7 @@ Open root player or SDK example, watch, then stop with Ctrl+C. Recording measure
 python experiments/rust_audit/playback_report.py experiments/rust_audit/output/playback
 ```
 
-A directory selects its latest recording by modification time. For comparison use exact JSONL files. The reporter writes sibling Markdown and summary JSON. Output is ignored; interrupted/running captures are marked incomplete. The [recording reference](../experiments/rust_audit/PLAYBACK_RECORDING.md) explains fields and reports.
+A directory selects its latest recording by modification time. For comparison use exact JSONL files. The reporter writes sibling Markdown and summary JSON. Output is ignored; interrupted/running captures are marked incomplete.
 
 | Metric | Meaning |
 | --- | --- |
@@ -69,4 +79,10 @@ Over-budget means production + send exceeds the effective frame interval. p95 is
 5. Client bottleneck: inspect decode/draw/drops. Server threads cannot accelerate JavaScript reconstruction or ASCII font drawing.
 6. Compare exact recordings and reverse run order when differences are small.
 
-Defaults remain Python, RAW, decode-ahead off and codec-default threading. The verified example opts into Rust/DCT/queue explicitly. Each socket owns its processing; one-client results do not establish multi-client capacity. Long-video validation remains an owner-controlled final check.
+Defaults remain Python, RAW, decode-ahead off and codec-default threading. The verified example opts into Rust/DCT/queue explicitly. Each socket owns its processing; one-client results do not establish multi-client capacity. Long-video validation remains a maintainer-controlled final check.
+
+## Scope of validation
+
+On 2026-10-08 the Windows checkout built with Python 3.11 and the stable FFmpeg 8.1 shared development package. The Python test suite, `npm test` (SDK API smoke check, root-player timing and SDK live-session scenarios) and the native Rust SAD test passed, and the maintainer confirmed playback through the root player and the local SDK page. These results cover the tested machine and scenarios. They do not establish 60 FPS on every device, a Linux/macOS compatibility matrix, multi-client capacity or long-duration behaviour.
+
+Build products, FFmpeg runtimes, recordings and source videos stay local; a source commit does not supply a working native library on another machine. The Docker recipe runs the Python server only and does not build Rust. Package metadata still reports 0.1.5 while the optional native module reports 0.2.0; neither is a published release of this integration.

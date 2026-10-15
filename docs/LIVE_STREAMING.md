@@ -13,7 +13,7 @@ Open `http://localhost:8000/`. Python is the default engine. FFmpeg is needed fo
 
 ## Rust pixel + DCT
 
-Build Rust using the [native installation guide](../rust_core/README.md), then use the configuration verified in the owner's playback test:
+Build Rust using the [native installation guide](../rust_core/README.md), then use the configuration verified in the maintainer's playback test:
 
 ```bash
 python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --cols 450 --fps 60 --no-thumbnails --decode-ahead 3

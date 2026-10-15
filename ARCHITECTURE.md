@@ -24,7 +24,7 @@ The purpose is creative and algorithmic control through this representation. Sta
 | Component | `src/ascf-element.js` | Packaged HTML wrapper |
 | Static | `compiler.py`, `static_player/` | Compile, reader/player and browser Studio |
 
-**Golden Master governance:** root `app.js`, `codec.js` and `index.html` are the standalone showcase reference. Refactoring or migrating this client into the SDK requires explicit owner approval. Protocol parity does not imply the root UI has been replaced by the SDK.
+**Golden Master governance:** root `app.js`, `codec.js` and `index.html` are the standalone showcase reference. Refactoring or migrating this client into the SDK requires explicit maintainer approval. Protocol parity does not imply the root UI has been replaced by the SDK.
 
 ## 2. Live pipeline
 
@@ -97,37 +97,4 @@ Current compiler output has an 18-byte big-endian header: ASC2 magic, float32 FP
 
 Static pixel packets use the compiler's tagged path, unlike untagged live RAW pixels. `--profile` enables pixel tag 4. The compiler still uses Python. Browser Studio encodes supported RAW/ZLIB/DELTA and can play other supported tags. Static playback needs no ASCILINE backend, but still has file/loading/buffer/render costs; zero latency and near-zero memory are not guarantees.
 
-See [validation](docs/README.md#scope-of-validation) and [measurements](docs/PERFORMANCE.md). Windows native build, automated controls/protocol and owner playback are verified. Native Linux/macOS, broad device/codec coverage and multi-client capacity need separate measurements. LLM directions remain research ideas, not shipped semantic understanding.
-
----
-
-## 6. Agent Comments
-
-### GPT Astra
-
-*Tarih: 15 Eylül 2026. Bu bölüm, ARCHITECTURE.md ve README.md üzerinden geliştirdiğim proje yorumudur. Mimari kuralların yerine geçmez; öneriler ve gelecek ihtimalleri, uygulanmış özellikler olarak okunmamalıdır.*
-
-#### ASCILINE'ı nasıl anlıyorum?
-
-Benim gözümde ASCILINE'ın merkezinde şu soru var: **Bir hareketli görüntüyü, yazılımın tek tek dokunabildiği karakterlere ve renk hücrelerine dönüştürürsek onunla neler yapabiliriz?** ASCII estetiği bu sorunun görünen yüzü. Asıl değer, görüntünün temsilini geliştiricinin kontrolüne açmakta: bir hücrenin karakteri, rengi, konumu ve zaman içindeki değişimi üzerinde işlem yapabilmek.
-
-Bu yüzden projeyi bir **hareketli görüntü temsil motoru** olarak okuyorum. Kaynaktan gelen görüntü bir ızgaraya dönüşüyor; kodlama, taşıma ve çizim katmanları bu temsili farklı ortamlara ulaştırıyor. Canlı yayın, SDK ve `.ascf` oynatımı, aynı fikrin farklı kullanım biçimleri. Pixel Mode da karakter estetiğinin ötesinde, görüntü verisine doğrudan erişim fikrini sürdürüyor.
-
-#### Felsefesi ve amaçlanan değer
-
-- **Görüntüyü programlanabilir bir malzeme yapmak.** Font, palet ve hücre davranışı üzerinde kontrol; görsel sanat, deneysel arayüzler ve etkileşimli anlatımlar için ortak bir temel sunabilir. Bence etkileşimin hazır olarak sunulduğu yerlerle, geliştiricinin bu veri üzerinden kurabileceği etkileşimler belgelerde açıkça ayrılmalı.
-- **Temsilin ayrıntısını ihtiyaca göre seçmek.** Izgara boyutu, renk derinliği ve kodlama tercihleri; görünüm, işlem yükü ve aktarım maliyeti arasında bilinçli seçim yapmayı sağlıyor. Başarıyı değerlendirirken hangi ayrıntının korunduğunu ve karşılığında hangi maliyetin doğduğunu birlikte ölçmek gerekiyor.
-- **Aynı fikri farklı ortamlarda kullanılabilir kılmak.** Terminal, tarayıcı, uygulama içine gömülen SDK ve statik dosya oynatımı, projenin taşınabilirlik hedefini somutlaştırıyor. Bu yolların ortak veri sözleşmeleriyle anlaşılabilir kalması, bana göre mimarinin uzun vadeli değerlerinden biri.
-- **Deney yaparken güvenilir bir temel korumak.** Golden Master kuralını, çalışan kullanıcı deneyimini koruyan bir sınır olarak anlıyorum. Yeni motor, codec veya SDK çalışmaları bu temelin yanında gelişip doğrulanmalı; aktarım kararları belgedeki yetkilendirme kuralına uymalı.
-
-#### ChatGPT ve diğer ajanlar açısından anlamı
-
-Bir ajan açısından ilgi çekici ihtimal, görüntünün konum ve zaman bilgisi taşıyan hücreler üzerinden incelenebilmesi. Örneğin belirli bir bölgede hangi hücrelerin değiştiğini çıkarmak, ileride görsel olayları inceleyen bir deneyin girdisi olabilir. README'deki LLM yönünü bu kapsamda bir araştırma fikri olarak görüyorum; mevcut bir ChatGPT entegrasyonu olarak değil.
-
-Ancak **karakterlerden oluşmak, kendiliğinden anlamsal olarak anlaşılır olmak demek değildir**. Bir ASCII kare nesne adlarını, olayları veya neden-sonuç ilişkilerini hazır olarak vermez. Ayrıca sıkıştırılmış ikili aktarımın küçük olması, modele metin olarak sunulduğunda az token gerektireceğini göstermez. Böyle bir yön geliştirilecekse aynı görevde doğruluk, token tüketimi, gecikme ve kaybolan görsel ayrıntı ölçülmeli. İlk somut adım, az sayıda kareyle dar kapsamlı bir değişim tespiti deneyi olabilir.
-
-#### Benim gelişim pusulam
-
-Bence ASCILINE'ın ilerlemesini yönlendirecek temel soru şu olmalı: **Bu değişiklik, görüntü üzerinde hangi yeni kontrolü sağlıyor ve bu kontrolün maliyeti ne?** Standart video araçları da Canvas üzerinden işlenebilir; projenin değerini anlatırken hücre ve karakter temsilinin sağladığı somut kolaylıkları göstermek daha açıklayıcı olur. Benzer şekilde hız ve bant genişliği iddiaları; içerik, çözünürlük, donanım ve kalite koşullarıyla birlikte sunulmalı.
-
-Benim anladığım vizyonun özeti: **ASCILINE, hareketli görüntüyü karakterler, renkler ve zaman üzerinden yeniden kurulabilen; geliştiricinin müdahale edebildiği bir ifade ortamına dönüştürmeyi amaçlıyor.** Bu fikrin gücü, estetik tercih ile mühendislik kontrolünü aynı temsil üzerinde buluşturmasında.
+See [validation](docs/PERFORMANCE.md#scope-of-validation) and [measurements](docs/PERFORMANCE.md). Windows native build, automated controls/protocol and maintainer playback are verified. Native Linux/macOS, broad device/codec coverage and multi-client capacity need separate measurements. LLM directions remain research ideas, not shipped semantic understanding.
