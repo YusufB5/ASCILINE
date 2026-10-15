@@ -37,6 +37,7 @@
 - [Zero-Dependency Static Web Player](#zero-dependency-static-web-player)
 - [JavaScript SDK (asciline-player)](#javascript-sdk-asciline-player)
 - [Installation](#installation)
+  - [Optional: Rust engine + live pixel DCT](#optional-rust-engine--live-pixel-dct-preview-windows-tested)
 - [Running with Docker](#running-with-docker)
 - [Customization](#customization)
 - [Troubleshooting](#troubleshooting)
@@ -59,9 +60,10 @@
 
 - **Cross-platform**: Windows, macOS, Linux.
 - **Real-time ASCII and pixel streaming**: low-latency video-to-text conversion; pixel mode replaces characters with colored blocks, approaching 360p quality.
-- **HTML5 Canvas rendering**, tuned for 24–30 FPS playback. Higher-FPS sources are automatically decimated for stability.
+- **HTML5 Canvas rendering**, tuned for 24–30 FPS playback (up to 60 FPS with the Rust engine in pixel mode). Higher-FPS sources are automatically decimated for stability.
 - **Master clock sync**: the audio track is the absolute time reference, keeping A/V synchronized.
 - **Low-overhead binary protocol**: frames are streamed as raw `Uint8Array` straight to the canvas.
+- **Live pixel DCT + optional Rust engine**: opt-in lossy DCT cuts live pixel-mode bandwidth by about 100–250× versus raw pixels, with either the Python or the Rust engine; Rust raises pixel mode to 60 FPS. [Details](#optional-rust-engine--live-pixel-dct-preview-windows-tested)
 - **Multiple color modes**: from black & white up to 16M-color high fidelity.
 - **Flexible video management**: JSON playlists (per-video mode & volume), folder-based auto-queuing, single-file mode, infinite loop — all via CLI flags.
 
@@ -445,6 +447,8 @@ Open `http://localhost:8000` in your browser.
 
 Python remains the default engine. An optional Rust engine (FFmpeg decoding, character mapping, native encoding) and an opt-in lossy DCT transport let **pixel mode stream live at up to 60 FPS** while sending a fraction of the raw pixel data.
 
+Live DCT is not tied to Rust: `--pixel-codec dct` also works with the default Python engine (`--engine python`, same protocol and decoder), where pixel mode keeps its 30 FPS default. DCT applies to pixel-mode file playback; ASCII modes and webcam input keep their existing transports.
+
 ```bash
 python rust_core/build.py --ffmpeg-dir "C:/path/to/ffmpeg-shared"
 python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --dct-quality 70 --cols 450 --fps 60 --decode-ahead 3
@@ -456,7 +460,7 @@ Measured on one Windows machine with one client, 59.94 FPS source, 464×256 code
 - **About 100–250× less bandwidth than raw pixel mode** on typical scenes (≈20 MB/s raw → ≈0.1 MB/s); high-motion scenes compress less (≈50×).
 - **Not a replacement for standard codecs:** in a small pilot, realtime VP9/AV1 reached the same image quality at half the bitrate or less. ASCILINE's goal is a programmable character/pixel representation, not beating H.264/VP9/AV1 on compression.
 
-Build requirements: [rust_core/README.md](rust_core/README.md) · flags and tuning: [docs/LIVE_STREAMING.md](docs/LIVE_STREAMING.md) · methods and results: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Linux/macOS native builds and multi-client capacity are not validated yet; Docker images do not build Rust.
+Build requirements: [rust_core/README.md](rust_core/README.md) · flags and tuning: [docs/LIVE_STREAMING.md](docs/LIVE_STREAMING.md) · methods and results: [docs/PERFORMANCE.md](docs/PERFORMANCE.md) · codec comparison with images: [CODEC_BENCHMARK.md](experiments/rust_audit/CODEC_BENCHMARK.md). Linux/macOS native builds and multi-client capacity are not validated yet; Docker images do not build Rust.
 
 ### Player controls
 
