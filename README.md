@@ -125,7 +125,7 @@ The original protocol re-sends the full grid every frame. An opt-in adaptive cod
 | `1`&nbsp;ZLIB | `zlib(framebuffer)` | general motion |
 | `2`&nbsp;DELTA | only the cells that changed since the last frame | static / low-motion |
 | `3`&nbsp;RLE_FULL | run-length encoded framebuffer | large flat-color regions |
-| `4`&nbsp;DCT | Discrete Cosine Transform | High-ratio spatial compression. Used exclusively by the static player. Automatically enforces `--pixel` output. |
+| `4`&nbsp;DCT | Discrete Cosine Transform | High-ratio lossy pixel compression. Static player via `compiler.py --profile`; live pixel mode via `--pixel-codec dct` (see [Rust engine + live DCT](#optional-rust-engine--live-pixel-dct-preview-windows-tested)). |
 
 Clients opt in with `/ws?codec=adaptive`; omit it and you get the original protocol byte-for-byte, so existing clients are unaffected. A keyframe is forced periodically so dropped packets / late joiners resync.
 
@@ -440,6 +440,23 @@ python stream_server.py --playlist playlist.json --cols 220 --loop
 ```
 
 Open `http://localhost:8000` in your browser.
+
+### Optional: Rust engine + live pixel DCT (preview, Windows-tested)
+
+Python remains the default engine. An optional Rust engine (FFmpeg decoding, character mapping, native encoding) and an opt-in lossy DCT transport let **pixel mode stream live at up to 60 FPS** while sending a fraction of the raw pixel data.
+
+```bash
+python rust_core/build.py --ffmpeg-dir "C:/path/to/ffmpeg-shared"
+python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --dct-quality 70 --cols 450 --fps 60 --decode-ahead 3
+```
+
+Measured on one Windows machine with one client, 59.94 FPS source, 464×256 coded grid, quality 70:
+
+- **~60 FPS** delivered in live playback, with ~7 ms average frame production on the server and ~2 ms DCT decode in the browser.
+- **About 100–250× less bandwidth than raw pixel mode** on typical scenes (≈20 MB/s raw → ≈0.1 MB/s); high-motion scenes compress less (≈50×).
+- **Not a replacement for standard codecs:** in a small pilot, realtime VP9/AV1 reached the same image quality at half the bitrate or less. ASCILINE's goal is a programmable character/pixel representation, not beating H.264/VP9/AV1 on compression.
+
+Build requirements: [rust_core/README.md](rust_core/README.md) · flags and tuning: [docs/LIVE_STREAMING.md](docs/LIVE_STREAMING.md) · methods and results: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Linux/macOS native builds and multi-client capacity are not validated yet; Docker images do not build Rust.
 
 ### Player controls
 
