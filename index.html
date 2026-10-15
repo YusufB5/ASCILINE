@@ -134,6 +134,15 @@
                         <span class="ctrl-icon">VOL_</span>
                         <input id="volume-slider" type="range" min="0" max="1" step="0.05" value="1">
                     </div>
+                    <div class="copy-btn-wrap">
+                        <button id="btn-copy" class="ctrl-btn" title="Copy current ASCII frame" aria-label="Copy current ASCII frame">
+                            <svg class="copy-icon" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                            </svg>
+                        </button>
+                        <div id="copy-tooltip" class="copy-tooltip" aria-live="polite">COPIED!</div>
+                    </div>
                     <button id="btn-filters" class="ctrl-btn" title="Settings">⚙</button>
                 </div>
 

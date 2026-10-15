@@ -266,7 +266,7 @@ Play a pre-compiled `.ascf` file directly from any static host (GitHub Pages, Ve
 </script>
 ```
 
-> Both modes share identical playback controls: `play()`, `pause()`, `resume()`, `togglePlay()`, `mute()`, `unmute()`, `setVolume()`, `setFilters()`, `destroy()`.
+> Both modes share identical playback controls: `play()`, `pause()`, `resume()`, `togglePlay()`, `mute()`, `unmute()`, `setVolume()`, `setFilters()`, `destroy()` (filters and seek: WS only).
 
 ---
 
@@ -324,7 +324,7 @@ DOM events are dispatched with the `ascf-` prefix (e.g. `ascf-playing`, `ascf-en
 | `muteButton` | `true` | Auto-create the mute/unmute toggle |
 | `clickToPlayPause` | `true` | Click canvas to toggle play/pause |
 | `keyboardShortcuts` | `true` | Spacebar toggles play/pause |
-| `selectionLayer` | `null` | Enable copyable text overlay |
+| `selectionLayer` | `false` | Enable copyable text overlay |
 | `bufferSize` | `4` | Jitter buffer depth (frames) |
 | `filters` | `{}` | Initial filter values (contrast, gamma, brightness…) |
 
@@ -625,7 +625,15 @@ Quick fixes for the most common issues. Full protocol/technical details will liv
 Live, browser-based showcase across multiple rendering modes: **[asciline.dev](https://www.asciline.dev)**
 
 ## Star History
-[![Star History Chart](https://stars.unv.one/svg/YusufB5/ASCILINE?theme=dark)](https://github.com/YusufB5/ASCILINE)
+## Star History
+
+<a href="https://www.star-history.com/?repos=yusufb5%2Fasciline&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=yusufb5/asciline&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=yusufb5/asciline&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=yusufb5/asciline&type=date&legend=top-left" />
+ </picture>
+</a>
 
 <a id="support"></a>
 ## Support ❤️
