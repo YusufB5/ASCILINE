@@ -33,7 +33,7 @@ No interpolation or equal-quality bitrate claim is made from these few points.
 
 ## Method
 
-- One local AV1 source video, Costa Rica, three 180-frame windows starting at
+- One local AV1 source video, Costa Rica (footage by Jacob + Katie Schwarz), three 180-frame windows starting at
   5s, 18s and 30s (540 unique input frames; about nine seconds total).
 - Every encoder receives the **same predecoded BGR frames**, 464x256 at
   60000/1001 FPS. No source decoding or live frame dropping in encoding tests.
@@ -123,11 +123,14 @@ benchmark. No source-dependent adaptive bitrate tuning is claimed for ASCILINE.
 
 Native-size mid-window frames; a single still does not show temporal artifacts.
 These sheets use the same half-rate comparison as the aggregate table.
-Generated files are local ignored artifacts and can be regenerated.
+They are stored losslessly (WebP, pixel-identical to the generated PNGs) so the
+comparison is not altered by image compression; regenerate them with the commands below.
 
-- [Window starting at 5s](output/codec-benchmark/comparison-5s.png)
-- [Window starting at 18s](output/codec-benchmark/comparison-18s.png)
-- [Window starting at 30s](output/codec-benchmark/comparison-30s.png)
+![Half-rate comparison, window starting at 5s](../../docs/images/codec-benchmark/comparison-5s.webp)
+![Half-rate comparison, window starting at 18s](../../docs/images/codec-benchmark/comparison-18s.webp)
+![Half-rate comparison, window starting at 30s](../../docs/images/codec-benchmark/comparison-30s.webp)
+
+<sub>Source footage: Costa Rica clip by Jacob + Katie Schwarz. Frames are shown only to compare codec output.</sub>
 
 ## Equal-rate comparison
 
@@ -171,9 +174,11 @@ Sheets show the source and each encoder's mid-window frame at native size, plus 
 4x nearest-neighbour crop of the 116x64 region with the most source detail
 (boxed in yellow). A single still does not show temporal artifacts.
 
-- [Window starting at 5s](output/codec-benchmark/equal-rate-5s.png)
-- [Window starting at 18s](output/codec-benchmark/equal-rate-18s.png)
-- [Window starting at 30s](output/codec-benchmark/equal-rate-30s.png)
+![Equal-rate comparison, window starting at 5s](../../docs/images/codec-benchmark/equal-rate-5s.webp)
+![Equal-rate comparison, window starting at 18s](../../docs/images/codec-benchmark/equal-rate-18s.webp)
+![Equal-rate comparison, window starting at 30s](../../docs/images/codec-benchmark/equal-rate-30s.webp)
+
+<sub>Source footage: Costa Rica clip by Jacob + Katie Schwarz. Frames are shown only to compare codec output.</sub>
 
 ## Reproduce
 
