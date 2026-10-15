@@ -166,7 +166,7 @@ def main():
                 decoded.unlink()
                 print(f"{start:g}s {label}: {row['mbps']:.3f} Mbps PSNR={row['rgb_psnr_db']:.2f} SSIM={row['rgb_ssim']:.4f}", flush=True)
         ref._mmap.close()
-        del ref
+        ref = None  # release the memmap; the nested quality() closure shares this cell
         reference.unlink()
     print(f"Results: {args.out / 'results.json'}", flush=True)
 
