@@ -1,8 +1,8 @@
 # ASCILINE vs software video encoders: first pilot
 
-Date: 2026-10-01. Source checkout: `1f2c6d93947426dbbecb5c4e2361d14c6fda0c53`.
-Native DLL SHA256: `4a711aeb2b1fcd1bc10874bea12ca8986dbfd63d0c60cd71ac3adeb55795dbaa`.
-FFmpeg: `ffmpeg version N-124953-gd30dead35e-20260611 Copyright (c) 2000-2026 the FFmpeg developers`.
+Date: 2026-10-01, re-run 2026-10-15 with identical measurements. Source checkout: `8bb7d31593d1e3cde984efa47861fd1c6e4be607`.
+Native DLL SHA256: `120066ba8fdddaa1966202b5265a49e419e911bcb416080c573b3b8c2ada73e9`.
+FFmpeg: `ffmpeg version n8.1.3-14-g330caae0c1-20261003 Copyright (c) 2000-2026 the FFmpeg developers`.
 
 ## Finding
 
@@ -128,6 +128,52 @@ Generated files are local ignored artifacts and can be regenerated.
 - [Window starting at 5s](output/codec-benchmark/comparison-5s.png)
 - [Window starting at 18s](output/codec-benchmark/comparison-18s.png)
 - [Window starting at 30s](output/codec-benchmark/comparison-30s.png)
+
+## Equal-rate comparison
+
+What does each encoder's output look like at about the same bandwidth? Standard
+encoders were given ASCILINE Q70's measured per-scene rate as their target (the
+`1x` points). The table reports **actual** payload rates; "Rate vs Q70" below 1
+means the encoder undershot and spent fewer bits than ASCILINE did.
+
+| Start | Encoder | Actual Mbit/s | Rate vs Q70 | RGB PSNR dB | RGB SSIM |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 5s | ASCILINE Q70 | 1.079 | 1.00 | 37.72 | 0.9444 |
+| 5s | H.264 / OpenH264 | 0.745 | 0.69 | 38.16 | 0.9505 |
+| 5s | VP9 / libvpx RT5 | 1.080 | 1.00 | 39.70 | 0.9646 |
+| 5s | AV1 / libaom RT8 | 0.963 | 0.89 | 38.58 | 0.9602 |
+| 18s | ASCILINE Q70 | 3.645 | 1.00 | 34.75 | 0.9298 |
+| 18s | H.264 / OpenH264 | 3.415 | 0.94 | 37.36 | 0.9655 |
+| 18s | VP9 / libvpx RT5 | 2.788 | 0.76 | 38.13 | 0.9746 |
+| 18s | AV1 / libaom RT8 | 3.185 | 0.87 | 37.18 | 0.9657 |
+| 30s | ASCILINE Q70 | 1.020 | 1.00 | 34.36 | 0.9327 |
+| 30s | H.264 / OpenH264 | 0.968 | 0.95 | 34.21 | 0.9344 |
+| 30s | VP9 / libvpx RT5 | 1.077 | 1.06 | 37.26 | 0.9757 |
+| 30s | AV1 / libaom RT8 | 0.989 | 0.97 | 36.93 | 0.9719 |
+| **all** | **ASCILINE Q70** | **1.915** | **1.00** | **35.37** | **0.9356** |
+| **all** | **H.264 / OpenH264** | **1.709** | **0.89** | **36.22** | **0.9501** |
+| **all** | **VP9 / libvpx RT5** | **1.648** | **0.86** | **38.25** | **0.9716** |
+| **all** | **AV1 / libaom RT8** | **1.712** | **0.89** | **37.51** | **0.9659** |
+
+At native 464x256 the five frames are hard to tell apart; the differences show
+in the zoomed crops. Even though the standard encoders spent slightly *fewer*
+bits overall (0.86-0.89x of ASCILINE Q70; OpenH264 undershot to 0.69x at 5s and
+VP9 to 0.76x at 18s), pooled RGB PSNR is about 2.9 dB higher for VP9, 2.1 dB for
+AV1 and 0.9 dB for OpenH264. In the crops ASCILINE shows visible 8x8 block
+structure and loses fine texture (palm fronds at 18s, foliage at 5s), while VP9
+and AV1 keep more texture with smoother edges. OpenH264 is roughly on par with
+ASCILINE only in the 30s window. Because the standards undershot, these points
+slightly understate their advantage. ASCILINE is not a more bit-efficient codec;
+its value is the programmable per-cell representation shared by the ASCII and
+pixel modes, decoded by plain JavaScript into Canvas at about 60 FPS.
+
+Sheets show the source and each encoder's mid-window frame at native size, plus a
+4x nearest-neighbour crop of the 116x64 region with the most source detail
+(boxed in yellow). A single still does not show temporal artifacts.
+
+- [Window starting at 5s](output/codec-benchmark/equal-rate-5s.png)
+- [Window starting at 18s](output/codec-benchmark/equal-rate-18s.png)
+- [Window starting at 30s](output/codec-benchmark/equal-rate-30s.png)
 
 ## Reproduce
 

@@ -14,6 +14,109 @@ sys.path.insert(0, str(ROOT))
 from asciline.engines import get_engine
 
 
+EQUAL_RATE = {"asciline-q70": "ASCILINE Q70", "h264-openh264-1x": "H.264 / OpenH264",
+              "vp9-vpx-rt5-1x": "VP9 / libvpx RT5", "av1-aom-rt8-1x": "AV1 / libaom RT8"}
+CROP, ZOOM = (116, 64), 4  # Zoomed crop fills one native 464x256 tile.
+
+
+def detailed_crop(reference):
+    """Top-left of the crop window with the most luma gradient energy."""
+    gray = np.asarray(reference.convert("L"), dtype=np.float64)
+    energy = np.zeros_like(gray)
+    energy[:, 1:] += np.abs(np.diff(gray, axis=1))
+    energy[1:, :] += np.abs(np.diff(gray, axis=0))
+    integral = np.pad(energy.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    (cw, ch), best = CROP, None
+    for y in range(0, gray.shape[0] - ch + 1, 4):
+        for x in range(0, gray.shape[1] - cw + 1, 4):
+            score = integral[y + ch, x + cw] - integral[y, x + cw] - integral[y + ch, x] + integral[y, x]
+            if best is None or score > best[0]:
+                best = (score, x, y)
+    return best[1], best[2]
+
+
+def equal_rate_section(out_dir, rows, starts, size, font, title_font):
+    """Sheets and table for ASCILINE Q70 vs standards targeted at the same per-scene rate."""
+    width, height = size
+    (cw, ch), cell_w, cell_h = CROP, width + 24, height + 82
+    lines = []
+    for start in starts:
+        scene = out_dir / f"scene-{start:g}"
+        reference = Image.open(scene / "reference.png").convert("RGB")
+        x0, y0 = detailed_crop(reference)
+        box = (x0, y0, x0 + cw, y0 + ch)
+        sheet = Image.new("RGB", (cell_w * 5, cell_h * 2 + 72), "#10161e")
+        draw = ImageDraw.Draw(sheet)
+        draw.text((12, 12), f"ASCILINE equal-rate comparison | window {start:g}s | 464 x 256 | mid-window frame",
+                  font=title_font, fill="white")
+        draw.text((12, 44), f"Standards target ASCILINE Q70's measured rate (1x). Labels show actual rates. "
+                  f"Bottom row: {ZOOM}x nearest-neighbour crop of the boxed region.", font=font, fill="#a9b6c6")
+        panels = [("Source (decoded reference)", reference, None)]
+        for label, name in EQUAL_RATE.items():
+            row = next(x for x in rows if x["start"] == start and x["label"] == label)
+            panels.append((name, Image.open(scene / f"{label}.png").convert("RGB"), row))
+        for i, (name, picture, row) in enumerate(panels):
+            x, y = i * cell_w + 12, 80
+            draw.text((x, y), name, font=font, fill="white")
+            if row:
+                draw.text((x, y + 25), f"{row['mbps']:.3f} Mbps | {row['rgb_psnr_db']:.2f} dB | SSIM {row['rgb_ssim']:.4f}",
+                          font=font, fill="#a9b6c6")
+            sheet.paste(picture, (x, y + 51))
+            draw.text((x, y + cell_h), f"{name.split(' /')[0]} crop x{x0}-{x0 + cw}, y{y0}-{y0 + ch}", font=font, fill="white")
+            sheet.paste(picture.crop(box).resize((cw * ZOOM, ch * ZOOM), Image.NEAREST), (x, y + cell_h + 51))
+        draw.rectangle((12 + x0 - 1, 131 + y0 - 1, 12 + x0 + cw, 131 + y0 + ch), outline="#ffcc00", width=2)
+        path = out_dir / f"equal-rate-{start:g}s.png"
+        sheet.save(path)
+        lines.append(f"- [Window starting at {start:g}s](output/codec-benchmark/{path.name})")
+    table = []
+    for start in starts:
+        anchor = next(x for x in rows if x["start"] == start and x["label"] == "asciline-q70")["mbps"]
+        for label, name in EQUAL_RATE.items():
+            x = next(x for x in rows if x["start"] == start and x["label"] == label)
+            table.append(f"| {start:g}s | {name} | {x['mbps']:.3f} | {x['mbps'] / anchor:.2f} | "
+                         f"{x['rgb_psnr_db']:.2f} | {x['rgb_ssim']:.4f} |")
+    for label, name in EQUAL_RATE.items():
+        group = [x for x in rows if x["label"] == label]
+        anchor = statistics.mean(x["mbps"] for x in rows if x["label"] == "asciline-q70")
+        mbps = statistics.mean(x["mbps"] for x in group)
+        psnr = 10 * math.log10(255 ** 2 / statistics.mean(x["rgb_mse"] for x in group))
+        table.append(f"| **all** | **{name}** | **{mbps:.3f}** | **{mbps / anchor:.2f}** | "
+                     f"**{psnr:.2f}** | **{statistics.mean(x['rgb_ssim'] for x in group):.4f}** |")
+    return """
+## Equal-rate comparison
+
+What does each encoder's output look like at about the same bandwidth? Standard
+encoders were given ASCILINE Q70's measured per-scene rate as their target (the
+`1x` points). The table reports **actual** payload rates; "Rate vs Q70" below 1
+means the encoder undershot and spent fewer bits than ASCILINE did.
+
+| Start | Encoder | Actual Mbit/s | Rate vs Q70 | RGB PSNR dB | RGB SSIM |
+| ---: | --- | ---: | ---: | ---: | ---: |
+""" + "\n".join(table) + f"""
+
+{EQUAL_RATE_INTERPRETATION}
+
+Sheets show the source and each encoder's mid-window frame at native size, plus a
+{ZOOM}x nearest-neighbour crop of the {cw}x{ch} region with the most source detail
+(boxed in yellow). A single still does not show temporal artifacts.
+
+""" + "\n".join(lines) + "\n"
+
+
+EQUAL_RATE_INTERPRETATION = """\
+At native 464x256 the five frames are hard to tell apart; the differences show
+in the zoomed crops. Even though the standard encoders spent slightly *fewer*
+bits overall (0.86-0.89x of ASCILINE Q70; OpenH264 undershot to 0.69x at 5s and
+VP9 to 0.76x at 18s), pooled RGB PSNR is about 2.9 dB higher for VP9, 2.1 dB for
+AV1 and 0.9 dB for OpenH264. In the crops ASCILINE shows visible 8x8 block
+structure and loses fine texture (palm fronds at 18s, foliage at 5s), while VP9
+and AV1 keep more texture with smoother edges. OpenH264 is roughly on par with
+ASCILINE only in the 30s window. Because the standards undershot, these points
+slightly understate their advantage. ASCILINE is not a more bit-efficient codec;
+its value is the programmable per-cell representation shared by the ASCII and
+pixel modes, decoded by plain JavaScript into Canvas at about 60 FPS."""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path(__file__).parent / "output/codec-benchmark/results.json")
@@ -35,7 +138,7 @@ def main():
     table = "\n".join(f"| {names[x['label']]} | {x['mbps']:.3f} | {x['psnr']:.2f} | {x['ssim']:.4f} |" for x in aggregates)
     text = f"""# ASCILINE vs software video encoders: first pilot
 
-Date: 2026-10-01. Source checkout: `{data['git_head']}`.
+Date: 2026-10-01, re-run 2026-10-15 with identical measurements. Source checkout: `{data['git_head']}`.
 Native DLL SHA256: `{data['native_sha256']}`.
 FFmpeg: `{data['ffmpeg_version']}`.
 
@@ -147,6 +250,7 @@ benchmark. No source-dependent adaptive bitrate tuning is claimed for ASCILINE.
         path = args.input.parent / f"comparison-{start:g}s.png"
         sheet.save(path)
         text += f"- [Window starting at {start:g}s](output/codec-benchmark/{path.name})\n"
+    text += equal_rate_section(args.input.parent, rows, starts, (width, height), font, title_font)
     text += """
 ## Reproduce
 
