@@ -69,7 +69,7 @@
 
 ## Architecture
 
-1. **Backend (Python/FastAPI)**: decodes video via OpenCV, maps pixels to ASCII via NumPy, streams binary frames.
+1. **Backend (Python/FastAPI)**: decodes video via OpenCV (or the optional Rust/FFmpeg engine), maps pixels to ASCII or pixel cells, and streams binary frames (optionally DCT-compressed in pixel mode).
 2. **Frontend (vanilla JS)**: receives binary frames over WebSocket, manages a jitter buffer, renders to a canvas grid.
 3. **Communication**: a custom `INIT` handshake negotiates resolution/FPS, followed by the binary frame stream.
 
@@ -81,6 +81,8 @@ ASCILINE/
 ├── ascii_video_player2.py       # Core VideoDecoder, AsciiMapper & standalone terminal player
 ├── codec.py                     # Master Python encoder (RAW/ZLIB/DELTA/RLE/DCT)
 ├── codec.js                     # Root JS decoder (Optimized for Live WebSocket streaming)
+├── 📁 asciline/                 # Engine selection (Python/Rust/auto), source queue, live DCT session, playback timing
+├── 📁 rust_core/                # Optional Rust engine: FFmpeg decode, ASCII mapping, DCT encoder + build script
 │
 # --- 2. Live Streaming Web Client ---
 ├── index.html                   # Web client UI for the live streaming server
@@ -101,15 +103,21 @@ ASCILINE/
 ├── stream_server.py             # FastAPI WebSocket server for real-time video streaming
 ├── ytdl.py                      # yt-dlp integration for dynamic YouTube/URL fetching
 │
-# --- 5. Development & Testing ---
-├── 📁 experiments/              # Codec benchmarks, test vectors & experimental scripts
-├── 📁 test/                     # E2E tests, unit tests & backpressure validation
+# --- 5. JavaScript SDK & Examples ---
+├── 📁 src/                      # asciline-player SDK: AsciiPlayer, LiveSession, <ascf-player> element
+├── 📁 examples/                 # SDK quickstarts (HTML, React) and live SDK demo
 │
-# --- 6. CLI Assets & Cache ---
+# --- 6. Development, Testing & Docs ---
+├── 📁 experiments/              # Codec benchmarks, test vectors & experimental scripts (rust_audit/: Rust/DCT evidence)
+├── 📁 test/                     # E2E tests, unit tests & backpressure validation
+├── 📁 docs/                     # Live streaming, SDK and performance guides
+├── ARCHITECTURE.md              # Pipeline, protocol and DCT internals
+│
+# --- 7. CLI Assets & Cache ---
 ├── logo.py                      # ASCII branding banner displayed on startup
 ├── 📁 videos/                   # Auto-managed local cache directory for downloaded media
 │
-# --- 7. Configuration & Infrastructure ---
+# --- 8. Configuration & Infrastructure ---
 ├── playlist.json                # Playback queue and per-video overrides
 ├── Dockerfile                   # Docker container configuration
 ├── docker-compose.yml           # Multi-service Docker setup
@@ -204,6 +212,8 @@ python -m http.server
 ## JavaScript SDK (`asciline-player`)
 
 The official JavaScript SDK ships as the `asciline-player` npm package (MIT license). It provides two complementary APIs: a full-featured `AsciiPlayer` class for programmatic control, and a zero-config `<ascf-player>` HTML element for drop-in embedding — both backed by the same high-performance render engine.
+
+> **Live DCT in the SDK:** the SDK in this repository (`src/`) negotiates synchronized playback and live pixel DCT automatically; no extra option is needed. The published npm release (0.1.5) predates this and keeps receiving raw pixels until the next release. When self-hosting the SDK, copy the whole `src/` folder (`asciline-player.js` imports `live-session.js`). Try it with `examples/sdk-live.html`; details in [docs/SDK.md](docs/SDK.md).
 
 ### Install
 
