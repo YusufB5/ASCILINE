@@ -63,7 +63,7 @@
 - **HTML5 Canvas rendering**, tuned for 24–30 FPS playback (up to 60 FPS with the Rust engine in pixel mode). Higher-FPS sources are automatically decimated for stability.
 - **Master clock sync**: the audio track is the absolute time reference, keeping A/V synchronized.
 - **Low-overhead binary protocol**: frames are streamed as raw `Uint8Array` straight to the canvas.
-- **Live pixel DCT + optional Rust engine**: opt-in lossy DCT cuts live pixel-mode bandwidth by about 100–250× versus raw pixels, with either the Python or the Rust engine; Rust raises pixel mode to 60 FPS. [Details](#optional-rust-engine--live-pixel-dct-preview-windows-tested)
+- **Compressed live pixel mode (DCT) + optional Rust engine**: an opt-in lossy codec streams pixel mode at roughly 0.1 MB/s instead of ~20 MB/s; the optional Rust engine raises pixel mode to 60 FPS. [Details](#optional-rust-engine--live-pixel-dct-preview-windows-tested)
 - **Multiple color modes**: from black & white up to 16M-color high fidelity.
 - **Flexible video management**: JSON playlists (per-video mode & volume), folder-based auto-queuing, single-file mode, infinite loop — all via CLI flags.
 
@@ -447,14 +447,34 @@ Open `http://localhost:8000` in your browser.
 
 Python remains the default engine. An optional Rust engine (FFmpeg decoding, character mapping, native encoding) and an opt-in lossy DCT transport let **pixel mode stream live at up to 60 FPS** while sending a fraction of the raw pixel data.
 
-Live DCT is not tied to Rust: `--pixel-codec dct` also works with the default Python engine (`--engine python`, same protocol and decoder), where pixel mode keeps its 30 FPS default. DCT applies to pixel-mode file playback; ASCII modes and webcam input keep their existing transports.
+Live DCT is not tied to Rust: `--pixel-codec dct` also works with the default Python engine (same protocol and decoder, 30 FPS default). DCT applies to pixel-mode file playback; ASCII modes and webcam input keep their existing transports.
 
 ```bash
+# Python engine (default, no build): pixel mode with live DCT
+python stream_server.py video.mp4 --pixel --pixel-codec dct --cols 320
+
+# Rust engine: build once (Cargo + FFmpeg 8.1 shared dev package), then check it loads
 python rust_core/build.py --ffmpeg-dir "C:/path/to/ffmpeg-shared"
-python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --dct-quality 70 --cols 450 --fps 60 --decode-ahead 3
+python -m asciline.engines --engine rust
+
+# Rust engine: pixel mode with live DCT at 60 FPS
+python stream_server.py video.mp4 --engine rust --pixel --pixel-codec dct --cols 450 --fps 60 --decode-ahead 3
+
+# Use Rust when it is available, otherwise fall back to Python
+python stream_server.py video.mp4 --engine auto --pixel --pixel-codec dct
 ```
 
-Measured on one Windows machine with one client, 59.94 FPS source, 464×256 coded grid, quality 70:
+| Flag | Default | What it does |
+| :--- | :--- | :--- |
+| `--engine python\|rust\|auto` | `python` | Decoder/encoder engine; `auto` falls back to Python if Rust is not built |
+| `--pixel-codec raw\|dct` | `raw` | Pixel transport; `dct` is lossy and much smaller |
+| `--dct-quality 1-100` | `70` | Lower is smaller and lossier; 100 is still lossy |
+| `--fps N` | ASCII 30, Python pixel 30, Rust pixel 60 | FPS ceiling (frames are sampled, never interpolated) |
+| `--decode-ahead 0\|2\|3` | `0` | Rust pixel only: decode the next frames while encoding |
+
+The Python DCT encoder is slower: on the test machine it needs about 24 ms per frame at `--cols 320` (fits 30 FPS) but about 43 ms at `--cols 450`, so use Rust for larger grids. All flags are listed in [docs/LIVE_STREAMING.md](docs/LIVE_STREAMING.md).
+
+Rust engine, measured on one Windows machine with one client, 59.94 FPS source, 464×256 coded grid, quality 70:
 
 - **~60 FPS** delivered in live playback, with ~7 ms average frame production on the server and ~2 ms DCT decode in the browser.
 - **About 100–250× less bandwidth than raw pixel mode** on typical scenes (≈20 MB/s raw → ≈0.1 MB/s); high-motion scenes compress less (≈50×).
