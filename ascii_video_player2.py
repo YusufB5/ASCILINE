@@ -5,6 +5,7 @@ Modular, True Color (24-bit ANSI), zero-flicker ASCII video player.
 
   - VideoDecoder    : Produces (gray, color) frame pairs from video.
   - AsciiMapper     : Gray matrix -> ASCII character + ANSI True Color code -> String.
+  - HalfBlockMapper : BGR matrix -> ▀ cells, top pixel as foreground, bottom as background.
   - TerminalRenderer: Main loop, FPS control, orientation detection, rendering.
 
 Dependencies:
@@ -20,6 +21,28 @@ import os
 
 # Enable ANSI color codes on PowerShell/CMD (Windows):
 os.system("")
+
+
+def _force_utf8_output() -> None:
+    """
+    Windows consoles come up on a legacy code page (cp1252, cp1254, ...) that
+    has no room for the \u2580 glyph half-block mode is built on, so --help and
+    every rendered frame would die with UnicodeEncodeError. Switch any stream
+    that cannot carry the glyph to UTF-8; errors="replace" leaves a stubborn
+    console printing "?" instead of raising. A pipe opened under an ASCII
+    locale hits the same wall, which is why this is not gated on win32.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            "\u2580".encode(getattr(stream, "encoding", None) or "ascii")
+        except (LookupError, UnicodeEncodeError):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, OSError):
+                pass
+
+
+_force_utf8_output()
 
 
 # ─────────────────────────────────────────────
@@ -199,6 +222,141 @@ class AsciiMapper:
 
 
 # ─────────────────────────────────────────────
+#  MODULE 2b ─ HalfBlockMapper
+# ─────────────────────────────────────────────
+class HalfBlockMapper:
+    """
+    Packs two pixels into every terminal cell using the upper-half block ▀:
+    the top pixel is the foreground colour, the bottom pixel the background.
+    Doubles vertical resolution compared to AsciiMapper at the same grid size.
+
+    Same convert() signature as AsciiMapper so TerminalRenderer can use either.
+    The gray matrix is ignored; there is no character to pick.
+    """
+
+    _GLYPH = "\u2580"
+    _RESET = "\033[0m"
+
+    # "0".."255", so the escape codes for a whole frame are assembled by NumPy
+    # instead of one Python f-string per cell. A 160x40 cell grid is 6400 cells
+    # per frame, far too many to format one at a time at 30 fps.
+    _DEC = np.array([str(v) for v in range(256)], dtype="U3")
+
+    def __init__(self, quantize_bits: int = 0) -> None:
+        self._qb = quantize_bits
+
+    def convert(self, gray, bgr: np.ndarray) -> str:
+        """
+        :param bgr: shape=(H,W,3) uint8 BGR matrix. Odd H gets a black row appended.
+        :return:    H/2 lines of coloured ▀ glyphs, each line ending in a reset.
+        """
+        if bgr.shape[0] % 2:
+            bgr = np.concatenate([bgr, np.zeros_like(bgr[:1])])
+
+        rgb = bgr[:, :, ::-1]
+        if self._qb > 0:
+            rgb = (rgb >> self._qb) << self._qb
+
+        top    = rgb[0::2]
+        bottom = rgb[1::2]
+
+        fg = self._escapes(top,    "\033[38;2;")
+        bg = self._escapes(bottom, "\033[48;2;")
+
+        # RLE: blank the escape wherever that half repeats the previous cell's
+        # colour. Column 0 stays False, so every line re-states both colours and
+        # a run never carries across a line break.
+        repeat = np.zeros(top.shape[:2], dtype=bool)
+        repeat[:, 1:] = np.all(top[:, 1:] == top[:, :-1], axis=2)
+        fg[repeat] = ""
+        repeat[:, 1:] = np.all(bottom[:, 1:] == bottom[:, :-1], axis=2)
+        bg[repeat] = ""
+
+        cells = np.char.add(np.char.add(fg, bg), self._GLYPH)
+
+        # Reset at every line end so centring padding on the next line is not
+        # painted with the last background colour.
+        return self._RESET + "\n".join(
+            "".join(row) + self._RESET for row in cells.tolist()
+        )
+
+    def convert_diff(self, bgr: np.ndarray, pad_x: int = 0, pad_y: int = 0,
+                     tolerance: int = 0) -> str:
+        """
+        Differential frame: redraw only the cells that visibly changed.
+
+        A cell is redrawn when its top or bottom colour moved by more than
+        ``tolerance`` (per channel, 0-255) from what is *currently on screen*.
+        The reference is the displayed colour, not the previous source frame,
+        so slow drifts still accumulate and eventually update.
+
+        Every span is positioned with an absolute cursor move (CUP), so no row
+        depends on the previous one and nothing can shear left/right.
+        The first call (or a size change) draws the whole frame.
+
+        :param pad_x: columns of centring offset.
+        :param pad_y: rows of centring offset.
+        :return:      escape string ready to write ('' if nothing changed).
+        """
+        if bgr.shape[0] % 2:
+            bgr = np.concatenate([bgr, np.zeros_like(bgr[:1])])
+        rgb = bgr[:, :, ::-1]
+        if self._qb > 0:
+            rgb = (rgb >> self._qb) << self._qb
+
+        top, bottom = rgb[0::2], rgb[1::2]
+        shown = getattr(self, "_shown", None)
+
+        if shown is None or shown[0].shape != top.shape:
+            self._shown = (top.copy(), bottom.copy())
+            changed = np.ones(top.shape[:2], dtype=bool)
+        else:
+            st, sb = shown
+            dt = np.abs(top.astype(np.int16) - st).max(axis=2)
+            db = np.abs(bottom.astype(np.int16) - sb).max(axis=2)
+            changed = (dt > tolerance) | (db > tolerance)
+            if not changed.any():
+                return ""
+            # Update only what we are redrawing; the rest keeps its old colour.
+            st[changed] = top[changed]
+            sb[changed] = bottom[changed]
+
+        st, sb = self._shown
+        fg = self._escapes(st, "\033[38;2;")
+        bg = self._escapes(sb, "\033[48;2;")
+        rep_fg = np.zeros(st.shape[:2], dtype=bool)
+        rep_bg = np.zeros(st.shape[:2], dtype=bool)
+        rep_fg[:, 1:] = np.all(st[:, 1:] == st[:, :-1], axis=2)
+        rep_bg[:, 1:] = np.all(sb[:, 1:] == sb[:, :-1], axis=2)
+
+        out = []
+        for r in np.flatnonzero(changed.any(axis=1)).tolist():
+            cols = np.flatnonzero(changed[r])
+            a, b = int(cols[0]), int(cols[-1]) + 1
+            f = np.where(rep_fg[r, a:b], "", fg[r, a:b])
+            g = np.where(rep_bg[r, a:b], "", bg[r, a:b])
+            f[0], g[0] = fg[r, a], bg[r, a]      # a span restates both colours
+            out.append(f"\033[{pad_y + r + 1};{pad_x + a + 1}H")
+            out.append("".join(np.char.add(np.char.add(f, g), self._GLYPH).tolist()))
+        out.append(self._RESET)
+        return "".join(out)
+
+    @classmethod
+    def _escapes(cls, px: np.ndarray, lead: str) -> np.ndarray:
+        """
+        True Color escape code for every pixel of an (H,W,3) RGB block.
+
+        :param lead: "\033[38;2;" for the foreground, "\033[48;2;" for the background.
+        :return:     shape=(H,W) unicode array of codes like "\033[38;2;12;34;56m".
+        """
+        dec = cls._DEC
+        add = np.char.add
+        return add(add(add(add(add(lead, dec[px[:, :, 0]]), ";"),
+                           dec[px[:, :, 1]]), ";"),
+                   add(dec[px[:, :, 2]], "m"))
+
+
+# ─────────────────────────────────────────────
 #  MODULE 3 ─ TerminalRenderer
 # ─────────────────────────────────────────────
 class TerminalRenderer:
@@ -213,6 +371,8 @@ class TerminalRenderer:
     """
 
     _CURSOR_HOME   = "\033[H"
+    _SYNC_BEGIN    = "\033[?2026h"  # synchronized output: begin atomic frame
+    _SYNC_END      = "\033[?2026l"  # synchronized output: present frame
     _HIDE_CURSOR   = "\033[?25l"
     _SHOW_CURSOR   = "\033[?25h"
     _DISABLE_WRAP  = "\033[?7l"    # prevent line wrapping
@@ -231,6 +391,8 @@ class TerminalRenderer:
         cols         : int = 0,
         fallback_fps : float = 0,
         mirror       : bool = False,
+        half_block   : bool = False,
+        tolerance    : int = 6,
     ) -> None:
         """
         :param path:          Path to video file or webcam index
@@ -239,10 +401,14 @@ class TerminalRenderer:
         :param cols:          Fixed columns. If 0, auto-fit to terminal.
         :param fallback_fps:  Fallback FPS if source FPS is unknown.
         :param mirror:        If True, flip each frame horizontally (for webcams).
+        :param half_block:    If True, render two pixels per cell with ▀ (palette is ignored).
+        :param tolerance:     Half-block only: redraw a cell only when a colour channel
+                              moved by more than this (0 = every change).
         """
         # ── Video metadata ────────────────────────────────────────────
         # Initialize decoder once with dummy dimensions to get source resolution
-        self._decoder = VideoDecoder(path, 2, 2, mirror=mirror, fallback_fps=fallback_fps)
+        self._decoder = VideoDecoder(path, 2, 2, skip_gray=half_block,
+                                     mirror=mirror, fallback_fps=fallback_fps)
         vid_w, vid_h = self._decoder.vid_w, self._decoder.vid_h
         src_fps      = self._decoder.fps
 
@@ -275,25 +441,37 @@ class TerminalRenderer:
                     cols = safe_cols
                     rows = max(1, int(cols * aspect * self.CHAR_RATIO))
 
+        # cols/rows above are terminal cells. Half-block mode fits the same
+        # cell grid but samples two pixel rows per cell.
+        pixel_rows = rows * 2 if half_block else rows
+
         # ── Calculate Center Padding ──────────────────────────────────────────────
         self._pad_y = max(0, (t_lines - rows) // 2)
         self._pad_x = " " * max(0, (t_cols - cols) // 2)
 
         # ── Info screen ──────────────────────────────────────────────────
+        if half_block:
+            grid_info = f"{cols}x{rows} cells, {cols}x{pixel_rows} pixels (half-block)"
+        else:
+            grid_info = f"{cols}x{rows} characters"
+
         print(self._CLEAR_SCREEN)
         print(
             f"\033[1m[ASCII Player — True Color]\033[0m\n"
             f"  Orientation : {orientation.upper()}\n"
             f"  Video       : {vid_w}x{vid_h}\n"
-            f"  ASCII       : {cols}x{rows} characters\n"
+            f"  ASCII       : {grid_info}\n"
             f"  FPS         : {src_fps:.1f}\n"
             f"  Quantization: {2**(8-quantize_bits)} levels/channel\n"
             f"  Exit        : Ctrl+C\n"
         )
         time.sleep(2.0)
 
-        self._decoder._size = (cols, rows)  # update target size after calculation
-        self._mapper        = AsciiMapper(palette, quantize_bits)
+        self._decoder._size = (cols, pixel_rows)  # update target size after calculation
+        self._mapper        = HalfBlockMapper(quantize_bits) if half_block \
+                              else AsciiMapper(palette, quantize_bits)
+        self._diff          = half_block
+        self._tolerance     = max(0, tolerance)
         self._fps           = src_fps
         self._frame_t       = 1.0 / self._fps
 
@@ -302,26 +480,55 @@ class TerminalRenderer:
         stdout = sys.stdout
 
         stdout.write(self._DISABLE_WRAP + self._HIDE_CURSOR + self._BLACK_BG)
+        if self._diff:
+            stdout.write(self._CLEAR_SCREEN)  # diff frames never repaint the margins
         stdout.flush()
+
+        # Wall-clock schedule: frame N is due at start + N * frame_t. When
+        # decode + mapping + the terminal write cannot keep up (maximised
+        # window), frames are dropped to stay in real time instead of the
+        # video sliding into slow motion.
+        can_drop = not self._decoder._is_webcam
+        start    = time.perf_counter()
+        index    = 0
 
         try:
             for gray_frame, bgr_frame in self._decoder:
-                t0 = time.perf_counter()
+                if self._diff:
+                    # Only changed cells, absolutely positioned (no shearing).
+                    ascii_frame = self._mapper.convert_diff(
+                        bgr_frame, len(self._pad_x), self._pad_y, self._tolerance)
+                    prefix = ""
+                else:
+                    ascii_frame = self._mapper.convert(gray_frame, bgr_frame)
 
-                ascii_frame = self._mapper.convert(gray_frame, bgr_frame)
-                
-                # Apply padding for centering
-                if self._pad_x:
-                    ascii_frame = self._pad_x + ascii_frame.replace('\n', '\n' + self._pad_x)
-                if self._pad_y > 0:
-                    ascii_frame = ('\n' * self._pad_y) + ascii_frame
+                    # Apply padding for centering
+                    if self._pad_x:
+                        ascii_frame = self._pad_x + ascii_frame.replace('\n', '\n' + self._pad_x)
+                    if self._pad_y > 0:
+                        ascii_frame = ('\n' * self._pad_y) + ascii_frame
+                    prefix = self._CURSOR_HOME
 
-                stdout.write(self._CURSOR_HOME + ascii_frame)
-                stdout.flush()
+                # Synchronized output (DEC 2026): the terminal presents the
+                # frame atomically, so a slow redraw no longer shows torn,
+                # vertically stretched bands. Unsupported terminals ignore it.
+                if ascii_frame:
+                    stdout.write(self._SYNC_BEGIN + prefix + ascii_frame
+                                 + self._SYNC_END)
+                    stdout.flush()
 
-                wait = self._frame_t - (time.perf_counter() - t0)
+                index += 1
+                due  = start + index * self._frame_t
+                wait = due - time.perf_counter()
                 if wait > 0:
                     time.sleep(wait)
+                elif can_drop:
+                    # Behind schedule: skip as many frames as we are late.
+                    late = int(-wait / self._frame_t)
+                    for _ in range(late):
+                        if not self._decoder.grab():
+                            break
+                        index += 1
 
         except KeyboardInterrupt:
             pass
@@ -349,6 +556,11 @@ if __name__ == "__main__":
         help="Color quality: 0=max quality, 3=max speed (default: 0)")
     parser.add_argument("-c", "--cols", type=int, default=0,
         help="Fixed grid width. If 0, auto-fits to terminal (default: 0)")
+    parser.add_argument("--half-block", action="store_true", default=False,
+        help="Render two pixels per cell with \u2580 (doubles vertical resolution)")
+    parser.add_argument("--tolerance", type=int, default=6,
+        help="Half-block: redraw only cells whose colour changed by more than this "
+             "(0-255, default: 6; 0 = redraw every change, lossless)")
     parser.add_argument("--webcam", action="store_true", default=False,
         help="Use webcam instead of a video file")
     parser.add_argument("--webcam-device", type=int, default=0,
@@ -361,6 +573,10 @@ if __name__ == "__main__":
 
     if not args.webcam and args.video is None:
         parser.error("a video file is required (or use --webcam)")
+    if not 0 <= args.tolerance <= 255:
+        parser.error("--tolerance must be between 0 and 255")
+    if args.half_block and args.palette:
+        parser.error("--palette has no effect with --half-block")
 
     custom_palette = args.palette.split() if args.palette else None
 
@@ -376,6 +592,8 @@ if __name__ == "__main__":
             cols          = args.cols,
             fallback_fps  = args.webcam_fps if args.webcam else 0,
             mirror        = mirror,
+            half_block    = args.half_block,
+            tolerance     = args.tolerance,
         )
         renderer.play()
     except FileNotFoundError as e:
