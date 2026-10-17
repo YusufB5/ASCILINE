@@ -99,3 +99,104 @@ jobs:
 
     - name: SDK Import Smoke Test
       run: node test/test_sdk_import.js
+
+  # Optional Rust engine (rust_core/). Kept apart from `test` so a native build
+  # problem never hides Python results. Fails if any native test skips.
+  native:
+    name: native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            ffmpeg: ffmpeg-n8.1-latest-linux64-lgpl-shared-8.1
+            archive: tar.xz
+          - os: windows-latest
+            ffmpeg: ffmpeg-n8.1-latest-win64-lgpl-shared-8.1
+            archive: zip
+    env:
+      CARGO_TERM_COLOR: always
+      NATIVE_TESTS: >-
+        test/test_sdk_profile.py test/test_engine_selection.py test/test_native_engine.py
+        test/test_live_profile.py test/test_playback_recording.py test/test_native_stream.py
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+
+    # test_live_profile/test_native_stream validate wire output with the shipped JS codec.
+    - name: Set up Node.cjs
+      uses: actions/setup-node@v7
+      with:
+        node-version: '20'
+
+    - name: Set up Rust stable
+      run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+
+    - name: Cache Cargo registry and target
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          rust_core/target
+        key: native-${{ runner.os }}-${{ hashFiles('rust_core/Cargo.lock') }}
+        restore-keys: native-${{ runner.os }}-
+
+    # Stable n8.1 branch shared dev build (include/, lib/, bin/); ffmpeg-next 8
+    # needs FFmpeg 8 headers, which apt/choco do not guarantee.
+    - name: Install FFmpeg 8.1 shared development package
+      run: |
+        url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${{ matrix.ffmpeg }}.${{ matrix.archive }}"
+        mkdir -p "$RUNNER_TEMP/ffmpeg"
+        curl -fsSL --retry 3 -o "$RUNNER_TEMP/ffmpeg/pkg.${{ matrix.archive }}" "$url"
+        cd "$RUNNER_TEMP/ffmpeg"
+        if [ "${{ matrix.archive }}" = zip ]; then 7z x -bso0 pkg.zip; else tar -xJf pkg.tar.xz; fi
+        root="$RUNNER_TEMP/ffmpeg/${{ matrix.ffmpeg }}"
+        if [ "$RUNNER_OS" = Windows ]; then root="$(cygpath -w "$root")"; fi
+        echo "FFMPEG_DIR=$root" >> "$GITHUB_ENV"
+        echo "$root/bin" >> "$GITHUB_PATH"
+        if [ "$RUNNER_OS" = Linux ]; then echo "LD_LIBRARY_PATH=$root/lib" >> "$GITHUB_ENV"; fi
+
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest numpy opencv-python aiohttp Pillow fastapi uvicorn websockets
+
+    - name: Install JS Dependencies
+      run: npm install ws
+
+    - name: Fetch crates
+      run: cargo fetch --locked --manifest-path rust_core/Cargo.toml
+
+    - name: Rust unit tests (SIMD SAD vs scalar)
+      run: python rust_core/build.py --test
+
+    - name: Build native engine
+      run: python rust_core/build.py
+
+    - name: Verify rust engine loads without fallback
+      run: |
+        python -m asciline.engines --engine rust | tee engine.json
+        python -c "import json; e = json.load(open('engine.json')); assert e['engine'] == 'rust' and e['fallback_reason'] is None, e"
+
+    - name: Native pytest (no skips allowed)
+      run: |
+        python -m pytest -q -rs $NATIVE_TESTS --junitxml=native.xml
+        python - <<'EOF'
+        import xml.etree.ElementTree as ET
+        skipped = [f"{c.get('classname')}::{c.get('name')}: {s.get('message')}"
+                   for c in ET.parse("native.xml").iter("testcase") for s in c.findall("skipped")]
+        if skipped:
+            raise SystemExit("Native tests skipped:\n" + "\n".join(skipped))
+        print("No native tests skipped.")
+        EOF
