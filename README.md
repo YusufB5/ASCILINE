@@ -15,9 +15,6 @@
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white)](#0-requirements)
 [![JavaScript](https://img.shields.io/badge/JavaScript-Vanilla-F7DF1E?logo=javascript&logoColor=black)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
-[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![OpenCV](https://img.shields.io/badge/OpenCV-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
-[![NumPy](https://img.shields.io/badge/NumPy-013243?logo=numpy&logoColor=white)](https://numpy.org/)
 [![HTML5 Canvas](https://img.shields.io/badge/HTML5_Canvas-E34F26?logo=html5&logoColor=white)](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API)
 [![License: AGPL v3](https://img.shields.io/badge/Engine_License-AGPL_v3-blue.svg)](LICENSE-AGPL)
 [![License: MIT](https://img.shields.io/badge/SDK_License-MIT-green.svg)](LICENSE-MIT)
