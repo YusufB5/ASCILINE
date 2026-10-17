@@ -524,6 +524,16 @@ python ascii_video_player2.py video.mp4 --half-block
 
 Leave out `--cols` and the player fills the terminal it starts in, so maximise the window and shrink the font first. `--palette` has no effect in half-block mode.
 
+Half-block mode only redraws the cells that changed since the last frame. `--tolerance` (default `6`) sets how much a colour channel must move before a cell is redrawn; `--tolerance 0` is lossless.
+
+<details>
+<summary>Before / after: default ASCII vs <code>--half-block</code> (160×40 cells)</summary>
+
+<img width="800" alt="Default ASCII vs --half-block at 160x40 cells" src="docs/images/651661171-4e9657c5-a441-482e-8509-41575e76bc80.png" />
+
+<sub>Comparison by <a href="https://github.com/OBrutus">@OBrutus</a> in <a href="https://github.com/YusufB5/ASCILINE/pull/70">#70</a>.</sub>
+</details>
+
 > Don't resize the terminal window during playback — dynamic text wrapping will corrupt the layout.
 
 ## Running with Docker
