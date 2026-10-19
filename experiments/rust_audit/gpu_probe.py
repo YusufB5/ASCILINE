@@ -8,9 +8,11 @@ Usage:
     python experiments/rust_audit/gpu_probe.py videos/costa_rica_60fps.mp4 --cols 200
     python experiments/rust_audit/gpu_probe.py video.mp4 --extra --pixel
 
-Run once normally (GPU result) and once with --no-sampler (stream rate).
-Note: Get-Counter sampling competes with the server for CPU (measured: 20 -> 6
-msg/s on one machine), so the message count here is NOT a frame-rate result.
+Run once normally (GPU result) and once with --no-sampler (production rate).
+Get-Counter sampling competes with the server for CPU and collapses the stream
+(measured), so server_production from a sampler run is NOT a performance result.
+Frames are unique '<index>\n<frame>' text messages; duplicates and control
+messages are reported separately.
 Scope: server process only, one machine, one clip. Browser rendering is NOT
 measured here. A control check confirms the counter reports other processes.
 """
@@ -47,13 +49,50 @@ $out | ConvertTo-Json -Compress
 
 
 async def pull(port, seconds):
-    n = 0
+    """Pull the stream and classify messages. Only text messages of the form
+    '<index>, newline, <frame>' count as frames; repeated indices are duplicates and
+    everything else (INIT/STATUS/SEEKED/errors) is protocol control. Binary
+    messages (colour/pixel modes) are counted separately, unclassified."""
+    seen, dup, control, binary, stamps = set(), 0, 0, 0, []
     async with websockets.connect(f"ws://localhost:{port}/ws", max_size=None) as ws:
         t = time.time()
         while time.time() - t < seconds:
-            await asyncio.wait_for(ws.recv(), 15)
-            n += 1
-    return n, time.time() - t
+            m = await asyncio.wait_for(ws.recv(), 15)
+            if isinstance(m, bytes):
+                binary += 1
+                continue
+            head, sep, _ = m.partition(chr(10))
+            if sep and head.isdigit():
+                if head in seen:
+                    dup += 1
+                else:
+                    seen.add(head)
+                    stamps.append(time.time() - t)
+            else:
+                control += 1
+    return {"unique_frames": len(seen), "duplicates": dup, "control": control,
+            "binary_unclassified": binary, "stamps": stamps, "seconds": time.time() - t}
+
+
+def rate_stats(stamps, seconds):
+    """Unique frames per 1 s bin, ignoring the first 2 s (startup)."""
+    bins = [0] * int(seconds)
+    for x in stamps:
+        if int(x) < len(bins):
+            bins[int(x)] += 1
+    bins = bins[2:-1] or bins
+    mean = sum(bins) / len(bins)
+    sd = (sum((v - mean) ** 2 for v in bins) / len(bins)) ** 0.5
+    return {"fps_mean": round(mean, 1), "fps_min": min(bins), "fps_stdev": round(sd, 2), "bins": len(bins)}
+
+
+def tree_cpu_seconds(pid):
+    """Total CPU seconds of a process and all its descendants (one cheap call)."""
+    ps = (f"$all=Get-CimInstance Win32_Process|select ProcessId,ParentProcessId;$k=@({pid});$q=@({pid});"
+          "while($q.Count){$c=$q[0];$q=$q[1..($q.Count)];$n=@($all|?{$_.ParentProcessId -eq $c}|%{$_.ProcessId});$k+=$n;$q+=$n};"
+          "($k|%{(Get-Process -Id $_ -ErrorAction SilentlyContinue).CPU}|measure -Sum).Sum")
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True).stdout.strip()
+    return float(out.replace(",", ".")) if out else 0.0
 
 
 async def run(args):
@@ -69,6 +108,7 @@ async def run(args):
                 break
             except Exception:
                 continue
+        cpu0 = tree_cpu_seconds(server.pid)
         puller = asyncio.create_task(pull(args.port, args.seconds))
         await asyncio.sleep(2)
         samples = []
@@ -79,13 +119,18 @@ async def run(args):
             samples = json.loads(ps.stdout or "[]")
             if isinstance(samples, dict):
                 samples = [samples]
-        msgs, secs = await puller
+        pulled = await puller
+        cpu1 = tree_cpu_seconds(server.pid)
     finally:
         server.terminate()
+    secs = pulled["seconds"]
     result = {
         "platform": platform.platform(), "cmd": " ".join(cmd[1:]), "seconds": round(secs, 1),
-        "sampler": not args.no_sampler, "messages": msgs,
-        "messages_per_s": round(msgs / secs, 1), "samples": len(samples),
+        "sampler": not args.no_sampler,
+        "frames": {k: pulled[k] for k in ("unique_frames", "duplicates", "control", "binary_unclassified")},
+        "server_production": rate_stats(pulled["stamps"], secs),
+        "server_cpu_cores_avg": round((cpu1 - cpu0) / secs, 2),
+        "samples": len(samples),
         "server_processes_max": max((s["server_processes"] for s in samples), default=None),
         "server_gpu_max_pct": max((s["server_gpu"] for s in samples), default=None),
         "server_gpu_engine_instances_max": max((s["server_engine_instances"] for s in samples), default=None),
