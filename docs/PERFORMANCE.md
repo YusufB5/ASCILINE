@@ -81,6 +81,31 @@ Over-budget means production + send exceeds the effective frame interval. p95 is
 
 Defaults remain Python, RAW, decode-ahead off and codec-default threading. The verified example opts into Rust/DCT/queue explicitly. Each socket owns its processing; one-client results do not establish multi-client capacity. Long-video validation remains a maintainer-controlled final check.
 
+## GPU use
+
+The README goal is "No GPU required" for ASCII modes. This section is the evidence and its limits. It supports "does not require a GPU"; it does not support "never touches the GPU", because Chrome draws the canvas on the GPU when one is available.
+
+Conditions: Windows 10, Radeon RX 560, Chrome 155, one 854x480 30 FPS clip, 200 columns, ASCII mode (mode 1), Python engine, 20 s per run, 3 runs per Chrome setting.
+
+| Question | Result |
+| --- | --- |
+| Server production rate (headless client, no sampler) | 30.0 FPS, minimum 29; 602 unique frames, 0 duplicates |
+| Server GPU use | No GPU engine instance for the server process tree; the same counter listed 23 other processes (control) |
+| Server CPU | About 0.17 cores on this clip |
+| Player FPS, Chrome GPU off (`gpu_compositing: disabled_software`) | 30, 30, 30; minimum 29 |
+| Player FPS, Chrome GPU on | 30, 30, 30; minimum 29 |
+| Chrome CPU, GPU off / on | 0.38-0.42 / 0.34-0.37 cores |
+| Chrome GPU engine use, GPU off / on | 0% / 0.74% mean, 1.1% maximum |
+
+Method notes:
+
+- Player FPS is the player's own status line (browser render rate), not server production rate; production is measured separately by `gpu_probe.py --no-sampler`.
+- The GPU counter sampler competes with the server for CPU and collapsed the stream (30 to under 1 message/s), so any run with the sampler active is a GPU observation only, never a performance result.
+- Chrome's actual mode is read from `SystemInfo.getInfo`, not assumed from `--disable-gpu`.
+- Reproduce: `python experiments/rust_audit/gpu_probe.py VIDEO --cols 200 --no-sampler` (rate), the same without `--no-sampler` (GPU counters), and `python experiments/rust_audit/browser_gpu_probe.py VIDEO --gpu off --repeat 3` (add `--chrome-gpu-engine` in a separate run for Chrome GPU use).
+
+Not yet verified: other operating systems and GPUs, the Rust engine, colour and pixel modes, 60 FPS sources, higher column counts, and real low-power devices (smart appliances, retro terminals, microcontrollers). The microcontroller and zero-GPU-device wording in the README is a design goal, not a measured result.
+
 ## Scope of validation
 
 On 2026-10-08 the Windows checkout built with Python 3.11 and the stable FFmpeg 8.1 shared development package. The Python test suite, `npm test` (SDK API smoke check, root-player timing and SDK live-session scenarios) and the native Rust SAD test passed, and the maintainer confirmed playback through the root player and the local SDK page. These results cover the tested machine and scenarios. They do not establish 60 FPS on every device, a Linux/macOS compatibility matrix, multi-client capacity or long-duration behaviour.
