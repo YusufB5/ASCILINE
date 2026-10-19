@@ -40,7 +40,14 @@ jobs:
 
     - name: Install System Dependencies (Windows)
       if: matrix.os == 'windows-latest'
-      run: choco install ffmpeg -y
+      run: |
+        choco install ffmpeg -y --no-progress
+        if ($LASTEXITCODE -ne 0) { choco install ffmpeg -y --no-progress --force }
+        # Later steps run in new shells (including Git Bash): expose the choco shims there.
+        Add-Content $env:GITHUB_PATH "C:\ProgramData\chocolatey\bin"
+        $env:Path += ";C:\ProgramData\chocolatey\bin"
+        Get-Command ffmpeg | Format-List Source
+        ffmpeg -version | Select-Object -First 1
 
     - name: Install Python Dependencies
       run: |
