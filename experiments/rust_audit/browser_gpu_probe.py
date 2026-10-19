@@ -35,7 +35,7 @@ async def main(a):
                             "--port", str(a.port), "--no-thumbnails", *a.extra], cwd=ROOT,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
     prof = tempfile.mkdtemp()
-    flags = [CHROME, f"--user-data-dir={prof}", "--remote-debugging-port=9333", "--no-first-run",
+    flags = [CHROME, f"--user-data-dir={prof}", f"--remote-debugging-port={a.dport}", "--no-first-run",
              "--autoplay-policy=no-user-gesture-required", "--new-window", f"http://localhost:{a.port}/"]
     if a.gpu == "off":
         flags.insert(1, "--disable-gpu")
@@ -50,12 +50,12 @@ async def main(a):
         for _ in range(40):
             time.sleep(0.5)
             try:
-                tab = next(t for t in http_json("http://localhost:9333/json") if t["type"] == "page" and f":{a.port}" in t["url"])
+                tab = next(t for t in http_json(f"http://localhost:{a.dport}/json") if t["type"] == "page" and f":{a.port}" in t["url"])
                 break
             except Exception: pass
         s = {"id": 0}
         async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=None) as ws:
-            bws = http_json("http://localhost:9333/json/version")["webSocketDebuggerUrl"]
+            bws = http_json(f"http://localhost:{a.dport}/json/version")["webSocketDebuggerUrl"]
             async with websockets.connect(bws, max_size=None) as b:
                 info = await cdp(b, {"id": 0}, "SystemInfo.getInfo")
             g = info.get("gpu", {})
@@ -75,6 +75,7 @@ async def main(a):
             print(json.dumps({
                 "chrome_gpu": a.gpu,
                 "chrome_feature_status": feats,
+                "fps_source": "player status line (browser render rate, not server production rate)",
                 "target_fps": fps[-1][1] if fps else None,
                 "samples": len(vals), "fps_mean": round(sum(vals) / len(vals), 1) if vals else None,
                 "fps_min": min(vals) if vals else None,
@@ -88,6 +89,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("video"); ap.add_argument("--cols", type=int, default=200)
     ap.add_argument("--port", type=int, default=8767); ap.add_argument("--seconds", type=int, default=25)
+    ap.add_argument("--debug-port", dest="dport", type=int, default=9333)
     ap.add_argument("--gpu", choices=("on", "off"), default="off")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[])
     asyncio.run(main(ap.parse_args()))

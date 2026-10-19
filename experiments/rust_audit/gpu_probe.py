@@ -2,12 +2,13 @@
 
 Starts stream_server.py on a video, pulls the websocket stream with a headless
 client (no browser, so no browser GPU), and samples the Windows
-"GPU Engine" performance counters for the server process tree.
+"GPU Engine" performance counters for the server process tree (all descendants).
 
 Usage:
     python experiments/rust_audit/gpu_probe.py videos/costa_rica_60fps.mp4 --cols 200
     python experiments/rust_audit/gpu_probe.py video.mp4 --extra --pixel
 
+Run once normally (GPU result) and once with --no-sampler (stream rate).
 Note: Get-Counter sampling competes with the server for CPU (measured: 20 -> 6
 msg/s on one machine), so the message count here is NOT a frame-rate result.
 Scope: server process only, one machine, one clip. Browser rendering is NOT
@@ -22,13 +23,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 PS = r"""
 $srv = %d
-$kids = @($srv) + (Get-CimInstance Win32_Process -Filter "ParentProcessId=$srv" | %% ProcessId)
+$all = Get-CimInstance Win32_Process | select ProcessId,ParentProcessId
+$kids = @($srv); $queue = @($srv)
+while ($queue.Count) { $cur = $queue[0]; $queue = $queue[1..($queue.Count)]
+  $c2 = @($all | ? { $_.ParentProcessId -eq $cur } | %% ProcessId)
+  $kids += $c2; $queue += $c2 }
 $out = @()
 1..%d | %% {
   $c = (Get-Counter '\GPU Engine(*)\Utilization Percentage' -ErrorAction SilentlyContinue).CounterSamples
   $pid_of = { [int]($args[0] -replace '^pid_(\d+)_.*','$1') }
   $mine = $c | ? { $kids -contains (& $pid_of $_.InstanceName) }
   $out += [pscustomobject]@{
+    server_processes = @($kids).Count
     server_gpu = [double](($mine | measure CookedValue -Sum).Sum)
     server_engine_instances = @($mine).Count
     system_gpu = [double](($c | measure CookedValue -Sum).Sum)
@@ -65,18 +71,22 @@ async def run(args):
                 continue
         puller = asyncio.create_task(pull(args.port, args.seconds))
         await asyncio.sleep(2)
-        samples_n = max(1, (args.seconds - 4) // 2)
-        ps = subprocess.run(["powershell", "-NoProfile", "-Command", PS % (server.pid, samples_n, 2000)],
-                            capture_output=True, text=True)
-        samples = json.loads(ps.stdout or "[]")
-        if isinstance(samples, dict):
-            samples = [samples]
+        samples = []
+        if not args.no_sampler:
+            samples_n = max(1, (args.seconds - 4) // 2)
+            ps = subprocess.run(["powershell", "-NoProfile", "-Command", PS % (server.pid, samples_n, 2000)],
+                                capture_output=True, text=True)
+            samples = json.loads(ps.stdout or "[]")
+            if isinstance(samples, dict):
+                samples = [samples]
         msgs, secs = await puller
     finally:
         server.terminate()
     result = {
         "platform": platform.platform(), "cmd": " ".join(cmd[1:]), "seconds": round(secs, 1),
-        "messages": msgs, "samples": len(samples),
+        "sampler": not args.no_sampler, "messages": msgs,
+        "messages_per_s": round(msgs / secs, 1), "samples": len(samples),
+        "server_processes_max": max((s["server_processes"] for s in samples), default=None),
         "server_gpu_max_pct": max((s["server_gpu"] for s in samples), default=None),
         "server_gpu_engine_instances_max": max((s["server_engine_instances"] for s in samples), default=None),
         "system_gpu_max_pct": max((s["system_gpu"] for s in samples), default=None),
@@ -93,5 +103,7 @@ if __name__ == "__main__":
     ap.add_argument("--cols", type=int, default=200)
     ap.add_argument("--port", type=int, default=8766)
     ap.add_argument("--seconds", type=int, default=30)
+    ap.add_argument("--no-sampler", action="store_true",
+                    help="no GPU counters: only report the unperturbed stream rate (control run)")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="extra stream_server.py flags")
     asyncio.run(run(ap.parse_args()))
