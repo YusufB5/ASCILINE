@@ -60,9 +60,11 @@ _ZLIB_MIN_FRAC = 0.10    # below this, full-frame zlib loses — don't bother
 def _rle_encode(frame: np.ndarray) -> bytes:
     """Run-Length Encoding of a full frame. Fully vectorized with NumPy."""
     C = frame.shape[2]
+    # Reshape can copy Fortran-order or row-reversed frames into contiguous storage.
     flat = frame.reshape(-1, C)
     n = len(flat)
 
+    # This fast path must stay byte-identical to the generic path below.
     if (type(frame) is np.ndarray and flat.dtype == np.uint8
             and n and flat.flags.c_contiguous):
         boundaries = np.empty(n + 1, dtype=np.bool_)
