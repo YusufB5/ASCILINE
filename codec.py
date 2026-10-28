@@ -60,8 +60,36 @@ _ZLIB_MIN_FRAC = 0.10    # below this, full-frame zlib loses — don't bother
 def _rle_encode(frame: np.ndarray) -> bytes:
     """Run-Length Encoding of a full frame. Fully vectorized with NumPy."""
     C = frame.shape[2]
+    # Reshape can copy Fortran-order or row-reversed frames into contiguous storage.
     flat = frame.reshape(-1, C)
     n = len(flat)
+
+    # This fast path must stay byte-identical to the generic path below.
+    if (type(frame) is np.ndarray and flat.dtype == np.uint8
+            and n and flat.flags.c_contiguous):
+        boundaries = np.empty(n + 1, dtype=np.bool_)
+        boundaries[0] = boundaries[n] = True
+        if C == 4:
+            cells = flat.view(np.uint32).reshape(-1)
+            np.not_equal(cells[1:], cells[:-1], out=boundaries[1:n])
+        else:
+            np.not_equal(flat[1:, 0], flat[:-1, 0], out=boundaries[1:n])
+            for channel in range(1, C):
+                boundaries[1:n] |= flat[1:, channel] != flat[:-1, channel]
+        indices = np.flatnonzero(boundaries)
+        lengths = indices[1:] - indices[:-1]
+        starts = indices[:-1]
+        if n > 65535 and lengths.max() > 65535:
+            # Split each overflowing run without introducing a zero-length tail.
+            repeats = (lengths - 1) // 65535 + 1
+            starts = np.repeat(starts, repeats)
+            counts = np.full(len(starts), 65535, dtype=np.intp)
+            counts[np.cumsum(repeats) - 1] = lengths - (repeats - 1) * 65535
+            lengths = counts
+        out = np.empty((len(starts), C + 2), dtype=np.uint8)
+        out[:, :2].view('<u2')[:, 0] = lengths
+        out[:, 2:] = flat[starts]
+        return out.tobytes()
 
     # Find run boundaries
     diffs = np.any(flat[1:] != flat[:-1], axis=1)
