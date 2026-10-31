@@ -201,6 +201,29 @@ class HalfBlockDiffTest(unittest.TestCase):
         self.assertEqual(out.count("▀"), 1)
         self.assertIn("\033[1;3H", out)
 
+    def _cells(self, top, bottom):
+        # One cell row from RGB colours per column; the mapper takes BGR.
+        frame = np.array([top, bottom], dtype=np.uint8)
+        return np.ascontiguousarray(frame[:, :, ::-1])
+
+    def test_span_head_restates_colours_equal_to_its_left_neighbour(self):
+        a, b = (10, 20, 30), (200, 150, 100)
+        mapper = HalfBlockMapper()
+        mapper.convert_diff(self._cells([a, a, a, b, b, b], [a, a, a, b, b, b]))
+        # Cell 3 now matches cell 2, but the cursor jump loses the colour state.
+        out = mapper.convert_diff(self._cells([a, a, a, a, b, b], [a, a, a, a, b, b]))
+        self.assertEqual(out, "\033[1;4H" + fg(*a) + bg(*a) + "▀" + RESET)
+
+    def test_only_the_half_that_differs_from_its_left_neighbour_is_restated(self):
+        k, r, g, b, w = (0, 0, 0), (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)
+        mapper = HalfBlockMapper()
+        mapper.convert_diff(self._cells([k] * 5, [k] * 5))
+        # Cell 2 changes only the top half vs cell 1, cell 3 only the bottom half.
+        out = mapper.convert_diff(self._cells([k, r, b, b, k], [k, g, g, w, k]),
+                                  pad_x=2, pad_y=1)
+        self.assertEqual(out, "\033[2;4H" + fg(*r) + bg(*g) + "▀"
+                         + fg(*b) + "▀" + bg(*w) + "▀" + RESET)
+
 
 class LegacyEncodingTest(unittest.TestCase):
     """
