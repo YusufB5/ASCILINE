@@ -149,7 +149,7 @@ jobs:
       run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
 
     - name: Cache Cargo registry and target
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           ~/.cargo/registry/index
