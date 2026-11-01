@@ -312,34 +312,67 @@ class HalfBlockMapper:
             changed = np.ones(top.shape[:2], dtype=bool)
         else:
             st, sb = shown
-            dt = np.abs(top.astype(np.int16) - st).max(axis=2)
-            db = np.abs(bottom.astype(np.int16) - sb).max(axis=2)
-            changed = (dt > tolerance) | (db > tolerance)
+            # |a - b| in uint8 as max - min, so no widening copy is needed.
+            def moved(px, ref):
+                d = np.maximum(px, ref)
+                d -= np.minimum(px, ref)
+                return np.maximum(np.maximum(d[..., 0], d[..., 1]), d[..., 2]) > tolerance
+
+            changed = moved(top, st) | moved(bottom, sb)
             if not changed.any():
                 return ""
             # Update only what we are redrawing; the rest keeps its old colour.
-            st[changed] = top[changed]
-            sb[changed] = bottom[changed]
+            where = changed[:, :, None]
+            np.copyto(st, top, where=where)
+            np.copyto(sb, bottom, where=where)
 
+        rows = np.flatnonzero(changed.any(axis=1))
+        if not rows.size:
+            return self._RESET
+
+        # Each redrawn row covers one span, from its first to its last changed cell.
+        span = changed[rows]
+        n, width = span.shape
+        first = span.argmax(axis=1)
+        lengths = width - span[:, ::-1].argmax(axis=1) - first
+
+        # Top and bottom side by side, each padded to 4 bytes, so a cell is
+        # two uint32 words and one comparison finds where either half differs
+        # from its left neighbour. An escape is only emitted there, and at the
+        # span head, which restates both colours.
         st, sb = self._shown
-        fg = self._escapes(st, "\033[38;2;")
-        bg = self._escapes(sb, "\033[48;2;")
-        rep_fg = np.zeros(st.shape[:2], dtype=bool)
-        rep_bg = np.zeros(st.shape[:2], dtype=bool)
-        rep_fg[:, 1:] = np.all(st[:, 1:] == st[:, :-1], axis=2)
-        rep_bg[:, 1:] = np.all(sb[:, 1:] == sb[:, :-1], axis=2)
+        if n != len(st):
+            st, sb = st[rows], sb[rows]
+        px = np.zeros((n, width, 2, 4), dtype=np.uint8)
+        px[:, :, 0, :3] = st
+        px[:, :, 1, :3] = sb
+        words = px.view(np.uint32)[..., 0]
+        new = np.empty((n, width, 2), dtype=bool)
+        new[:, 0] = True
+        np.not_equal(words[:, 1:], words[:, :-1], out=new[:, 1:])
+        new[np.arange(n), first] = True
 
-        out = []
-        for r in np.flatnonzero(changed.any(axis=1)).tolist():
-            cols = np.flatnonzero(changed[r])
-            a, b = int(cols[0]), int(cols[-1]) + 1
-            f = np.where(rep_fg[r, a:b], "", fg[r, a:b])
-            g = np.where(rep_bg[r, a:b], "", bg[r, a:b])
-            f[0], g[0] = fg[r, a], bg[r, a]      # a span restates both colours
-            out.append(f"\033[{pad_y + r + 1};{pad_x + a + 1}H")
-            out.append("".join(np.char.add(np.char.add(f, g), self._GLYPH).tolist()))
-        out.append(self._RESET)
-        return "".join(out)
+        # Full-width spans (first draw, dense changes) need no masking.
+        if (lengths == width).all():
+            new, px = new.reshape(-1, 2), px.reshape(-1, 2, 4)
+        else:
+            col = np.arange(width)
+            in_span = (col >= first[:, None]) & (col < (first + lengths)[:, None])
+            new, px = new[in_span], px[in_span]
+
+        # One %-template per cell, picked by which halves restate a colour,
+        # then a single format call fills in all the colour values at once.
+        fg, bg, glyph = "\033[38;2;%d;%d;%dm", "\033[48;2;%d;%d;%dm", self._GLYPH
+        templates = np.array([glyph, fg + glyph, bg + glyph, fg + bg + glyph],
+                             dtype=object)
+        flags = new.view(np.uint8)
+        cells = templates[flags[:, 0] + 2 * flags[:, 1]].tolist()
+        starts = np.cumsum(lengths) - lengths
+        for i, r, a in zip(starts.tolist(), rows.tolist(), first.tolist()):
+            cells[i] = f"\033[{pad_y + r + 1};{pad_x + a + 1}H" + cells[i]
+
+        colours = px[new][:, :3].ravel()
+        return "".join(cells) % tuple(colours.tolist()) + self._RESET
 
     @classmethod
     def _escapes(cls, px: np.ndarray, lead: str) -> np.ndarray:
