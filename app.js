@@ -578,6 +578,13 @@ function renderFrame(now) {
     if (reliefActive()) {
         // 3D view: the frame bytes go to the GPU unchanged; the 2D layers are hidden.
         relief.update(frame);
+        if (!pixelMode) {
+            // Keep the hidden text layer current so "copy frame" still copies this frame.
+            for (let i = 0, cell = 0; i < frame.length; i += 4, cell++) {
+                selectionBuffer[Math.floor(cell / gridCols) * (gridCols + 1) + cell % gridCols] = frame[i];
+            }
+            player.textContent = textDecoder.decode(selectionBuffer);
+        }
     } else if (pixelMode) {
         // ── ZERO-COPY PIXEL MODE ──
         // Server sends raw BGR (3 bytes/pixel). We swap B↔R here.
