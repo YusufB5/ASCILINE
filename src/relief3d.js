@@ -10,6 +10,9 @@
  *   'bgr'  — pixel mode, 3 bytes per cell: B, G, R
  *   'cell' — ASCII colour modes 2–6, 4 bytes per cell: char code, R, G, B
  *
+ * Styles: 'columns' extrude each cell from the base plane into a solid block;
+ * 'floating' draws a thin tile at the same height, so cells hover in space.
+ *
  * In 'cell' layout the block tops can show the cell's character (glyphs), so
  * the 3D view keeps the ASCII text instead of only its colour.
  *
@@ -20,6 +23,7 @@
 
 const DEFAULTS = {
     depth: 1.0,        // block height scale (0 = flat)
+    style: 'columns',  // 'columns' rise from the base; 'floating' thin tiles hover at their height
     gap: 0.06,         // gap between blocks, as a fraction of a cell
     glyphs: true,      // draw characters on block tops in 'cell' layout
     invert: false,     // dark cells stand out instead of bright ones
@@ -48,6 +52,7 @@ uniform vec2 uCell;           // world size of one cell
 uniform float uDepth;
 uniform float uGap;
 uniform float uInvert;
+uniform int uStyle;           // 0 = columns, 1 = floating tiles
 uniform mat4 uViewProj;
 
 out vec3 vColor;
@@ -66,12 +71,16 @@ void main() {
     lum = mix(lum, 1.0 - lum, uInvert);
     float h = max(lum * uDepth * ${DEPTH_UNIT.toFixed(4)}, ${MIN_HEIGHT.toFixed(4)});
 
+    // Columns span 0..h; floating tiles are a thin slab whose top sits at h.
+    float thick = uCell.y * 0.12;
+    float z = uStyle == 1 ? h + (aPos.z - 1.0) * thick : aPos.z * h;
+
     vec2 half_ = vec2(uGrid) * uCell * 0.5;
     vec2 inner = uGap * 0.5 + aPos.xy * (1.0 - uGap);
     vec3 world = vec3(
         -half_.x + (float(col) + inner.x) * uCell.x,
          half_.y - (float(row) + 1.0 - inner.y) * uCell.y,
-         aPos.z * h);
+         z);
 
     vColor = color;
     vNormal = aNormal;
@@ -326,7 +335,7 @@ export class Relief3D {
         this.program = prog;
         this.u = {};
         for (const name of ['uFrame', 'uLayout', 'uGrid', 'uCell', 'uDepth', 'uGap', 'uInvert',
-            'uViewProj', 'uAtlas', 'uGlyphs', 'uLight']) {
+            'uViewProj', 'uAtlas', 'uGlyphs', 'uLight', 'uStyle']) {
             this.u[name] = gl.getUniformLocation(prog, name);
         }
 
@@ -472,6 +481,7 @@ export class Relief3D {
         gl.uniform1f(u.uDepth, this.opts.depth);
         gl.uniform1f(u.uGap, Math.min(0.5, Math.max(0, this.opts.gap)));
         gl.uniform1f(u.uInvert, this.opts.invert ? 1 : 0);
+        gl.uniform1i(u.uStyle, this.opts.style === 'floating' ? 1 : 0);
         gl.uniform3f(u.uLight, -0.55, 0.62, 0.56);
         gl.uniformMatrix4fv(u.uViewProj, false, this._viewProj);
         gl.bindVertexArray(this.vao);

@@ -1184,12 +1184,13 @@ if (filterReset) {
 const PREF_RELIEF = 'asciline_relief';
 const filterReliefBtn    = document.getElementById('filter-relief');
 const filterReliefDepth  = document.getElementById('filter-relief-depth');
+const filterReliefStyle  = document.getElementById('filter-relief-style');
 const reliefDepthVal     = document.getElementById('filter-relief-depth-val');
 const filterReliefGlyphs = document.getElementById('filter-relief-glyphs');
 const filterReliefOrbit  = document.getElementById('filter-relief-orbit');
 const filterReliefReset  = document.getElementById('filter-relief-reset');
 
-let reliefPrefs = { enabled: false, depth: 1.0, glyphs: true, autoOrbit: false };
+let reliefPrefs = { enabled: false, style: 'columns', depth: 1.0, glyphs: true, autoOrbit: false };
 let relief = null;          // Relief3D instance once loaded
 let reliefLoading = null;   // pending import
 
@@ -1199,6 +1200,7 @@ try {
         const depth = parseFloat(saved.depth);
         reliefPrefs = {
             enabled: Boolean(saved.enabled),
+            style: saved.style === 'floating' ? 'floating' : 'columns',
             depth: Number.isFinite(depth) ? Math.min(4, Math.max(0, depth)) : 1.0,
             glyphs: saved.glyphs !== false,
             autoOrbit: Boolean(saved.autoOrbit),
@@ -1220,6 +1222,10 @@ function syncReliefUI() {
     setToggle(filterReliefBtn, reliefPrefs.enabled);
     setToggle(filterReliefGlyphs, reliefPrefs.glyphs);
     setToggle(filterReliefOrbit, reliefPrefs.autoOrbit);
+    if (filterReliefStyle) {
+        filterReliefStyle.dataset.active = reliefPrefs.style === 'floating' ? 'true' : 'false';
+        filterReliefStyle.textContent = reliefPrefs.style === 'floating' ? 'FLOATING' : 'COLUMNS';
+    }
     if (filterReliefDepth) filterReliefDepth.value = reliefPrefs.depth;
     if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
 }
@@ -1251,7 +1257,8 @@ function loadRelief() {
     reliefLoading = import('/static/src/relief3d.js').then((mod) => {
         if (!mod.isRelief3DSupported()) throw new Error('WebGL2 is not available in this browser');
         relief = new mod.Relief3D(container, {
-            depth: reliefPrefs.depth, glyphs: reliefPrefs.glyphs, autoOrbit: reliefPrefs.autoOrbit,
+            style: reliefPrefs.style, depth: reliefPrefs.depth, glyphs: reliefPrefs.glyphs,
+            autoOrbit: reliefPrefs.autoOrbit,
         });
         applyReliefGrid();
         return relief;
@@ -1281,6 +1288,15 @@ if (filterReliefBtn) {
         syncReliefUI();
         if (reliefPrefs.enabled) loadRelief();
         applyReliefVisibility();
+    });
+}
+if (filterReliefStyle) {
+    filterReliefStyle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reliefPrefs.style = reliefPrefs.style === 'floating' ? 'columns' : 'floating';
+        syncReliefUI();
+        if (relief) relief.set({ style: reliefPrefs.style });
+        saveReliefPrefs();
     });
 }
 if (filterReliefDepth) {
