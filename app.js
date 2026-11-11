@@ -1186,11 +1186,13 @@ const filterReliefBtn    = document.getElementById('filter-relief');
 const filterReliefDepth  = document.getElementById('filter-relief-depth');
 const filterReliefStyle  = document.getElementById('filter-relief-style');
 const reliefDepthVal     = document.getElementById('filter-relief-depth-val');
-const filterReliefGlyphs = document.getElementById('filter-relief-glyphs');
+const reliefOptions      = document.getElementById('relief-options');
+const paletteSection     = document.getElementById('palette-section');
 const filterReliefOrbit  = document.getElementById('filter-relief-orbit');
 const filterReliefReset  = document.getElementById('filter-relief-reset');
 
-let reliefPrefs = { enabled: false, style: 'columns', depth: 1.0, glyphs: true, autoOrbit: false };
+// ASCII modes always show their characters on the block tops; pixel mode never has any.
+let reliefPrefs = { enabled: false, style: 'columns', depth: 1.0, autoOrbit: false };
 let relief = null;          // Relief3D instance once loaded
 let reliefLoading = null;   // pending import
 
@@ -1202,7 +1204,6 @@ try {
             enabled: Boolean(saved.enabled),
             style: saved.style === 'floating' ? 'floating' : 'columns',
             depth: Number.isFinite(depth) ? Math.min(4, Math.max(0, depth)) : 1.0,
-            glyphs: saved.glyphs !== false,
             autoOrbit: Boolean(saved.autoOrbit),
         };
     }
@@ -1220,7 +1221,6 @@ function setToggle(btn, on) {
 
 function syncReliefUI() {
     setToggle(filterReliefBtn, reliefPrefs.enabled);
-    setToggle(filterReliefGlyphs, reliefPrefs.glyphs);
     setToggle(filterReliefOrbit, reliefPrefs.autoOrbit);
     if (filterReliefStyle) {
         filterReliefStyle.dataset.active = reliefPrefs.style === 'floating' ? 'true' : 'false';
@@ -1228,6 +1228,14 @@ function syncReliefUI() {
     }
     if (filterReliefDepth) filterReliefDepth.value = reliefPrefs.depth;
     if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
+    syncFilterSections();
+}
+
+// Hide settings that do nothing right now: 3D options while 3D is off, the
+// ASCII palette in pixel mode.
+function syncFilterSections() {
+    if (reliefOptions) reliefOptions.hidden = !reliefPrefs.enabled;
+    if (paletteSection) paletteSection.hidden = pixelMode;
 }
 
 // True when the current stream can be drawn in 3D (binary cell frames).
@@ -1250,6 +1258,7 @@ function applyReliefGrid() {
             pixelMode ? 1 : charWidth / charHeight);
     }
     applyReliefVisibility();
+    syncFilterSections();
 }
 
 function loadRelief() {
@@ -1257,8 +1266,7 @@ function loadRelief() {
     reliefLoading = import('/static/src/relief3d.js').then((mod) => {
         if (!mod.isRelief3DSupported()) throw new Error('WebGL2 is not available in this browser');
         relief = new mod.Relief3D(container, {
-            style: reliefPrefs.style, depth: reliefPrefs.depth, glyphs: reliefPrefs.glyphs,
-            autoOrbit: reliefPrefs.autoOrbit,
+            style: reliefPrefs.style, depth: reliefPrefs.depth, autoOrbit: reliefPrefs.autoOrbit,
         });
         applyReliefGrid();
         return relief;
@@ -1304,15 +1312,6 @@ if (filterReliefDepth) {
         reliefPrefs.depth = parseFloat(filterReliefDepth.value);
         if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
         if (relief) relief.set({ depth: reliefPrefs.depth });
-        saveReliefPrefs();
-    });
-}
-if (filterReliefGlyphs) {
-    filterReliefGlyphs.addEventListener('click', (e) => {
-        e.stopPropagation();
-        reliefPrefs.glyphs = !reliefPrefs.glyphs;
-        setToggle(filterReliefGlyphs, reliefPrefs.glyphs);
-        if (relief) relief.set({ glyphs: reliefPrefs.glyphs });
         saveReliefPrefs();
     });
 }
