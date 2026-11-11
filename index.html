@@ -91,6 +91,29 @@
                                 <button id="filter-pixel" class="filter-toggle-btn" data-active="false" title="Switch to pixel mode (Soft reload)">OFF</button>
                             </div>
 
+                            <div class="filter-divider">3D RELIEF</div>
+                            <div class="filter-row">
+                                <label class="filter-label">3D VIEW</label>
+                                <button id="filter-relief" class="filter-toggle-btn" data-active="false" title="Draw the stream as 3D blocks (drag to orbit, Shift-drag to pan, wheel to zoom)">OFF</button>
+                            </div>
+                            <div class="filter-row">
+                                <label class="filter-label" for="filter-relief-depth">DEPTH</label>
+                                <input id="filter-relief-depth" type="range" min="0" max="4" step="0.05" value="1" class="filter-slider">
+                                <span id="filter-relief-depth-val" class="filter-val">1.00</span>
+                            </div>
+                            <div class="filter-row">
+                                <label class="filter-label">GLYPHS</label>
+                                <button id="filter-relief-glyphs" class="filter-toggle-btn" data-active="true" title="Show characters on block tops (ASCII modes)">ON</button>
+                            </div>
+                            <div class="filter-row">
+                                <label class="filter-label">ORBIT</label>
+                                <button id="filter-relief-orbit" class="filter-toggle-btn" data-active="false" title="Gently sway the camera">OFF</button>
+                            </div>
+                            <div class="filter-row">
+                                <label class="filter-label">CAMERA</label>
+                                <button id="filter-relief-reset" class="filter-toggle-btn" title="Restore the default camera angle">RESET</button>
+                            </div>
+
                             <div class="filter-divider">ASCII PALETTE</div>
                             <div class="filter-palette-group">
                                 <label class="filter-palette-option">

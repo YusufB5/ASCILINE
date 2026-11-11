@@ -177,6 +177,7 @@ function buildCanvas(cols, rows) {
         for (let c = 0; c < cols; c++) xPos[c] = c * charWidth;
         for (let r = 0; r < rows; r++) yPos[r] = r * charHeight;
     }
+    applyReliefGrid();
 }
 
 // ═══════════════════════════════════════
@@ -574,7 +575,10 @@ function renderFrame(now) {
 
     lastRenderTime = now;
 
-    if (pixelMode) {
+    if (reliefActive()) {
+        // 3D view: the frame bytes go to the GPU unchanged; the 2D layers are hidden.
+        relief.update(frame);
+    } else if (pixelMode) {
         // ── ZERO-COPY PIXEL MODE ──
         // Server sends raw BGR (3 bytes/pixel). We swap B↔R here.
         const view = frame; // Already a Uint8Array
@@ -1168,6 +1172,147 @@ if (filterReset) {
         currentFilters = { contrast: 1.0, gamma: 1.0, brightness: 0, invert: false, sharpness: 0, palette: 'default' };
         syncFilterUI();
         sendFilters();
+    });
+}
+
+// ═══════════════════════════════════════
+//  3D RELIEF VIEW (src/relief3d.js, loaded on first use)
+// ═══════════════════════════════════════
+// The same decoded frames the 2D canvas draws are handed to a WebGL2 view
+// that turns every cell into a block. Off by default; text-only mode 1 stays 2D.
+
+const PREF_RELIEF = 'asciline_relief';
+const filterReliefBtn    = document.getElementById('filter-relief');
+const filterReliefDepth  = document.getElementById('filter-relief-depth');
+const reliefDepthVal     = document.getElementById('filter-relief-depth-val');
+const filterReliefGlyphs = document.getElementById('filter-relief-glyphs');
+const filterReliefOrbit  = document.getElementById('filter-relief-orbit');
+const filterReliefReset  = document.getElementById('filter-relief-reset');
+
+let reliefPrefs = { enabled: false, depth: 1.0, glyphs: true, autoOrbit: false };
+let relief = null;          // Relief3D instance once loaded
+let reliefLoading = null;   // pending import
+
+try {
+    const saved = JSON.parse(localStorage.getItem(PREF_RELIEF) || 'null');
+    if (saved && typeof saved === 'object') {
+        const depth = parseFloat(saved.depth);
+        reliefPrefs = {
+            enabled: Boolean(saved.enabled),
+            depth: Number.isFinite(depth) ? Math.min(4, Math.max(0, depth)) : 1.0,
+            glyphs: saved.glyphs !== false,
+            autoOrbit: Boolean(saved.autoOrbit),
+        };
+    }
+} catch (_) { /* ignore unavailable storage or corrupt prefs */ }
+
+function saveReliefPrefs() {
+    try { localStorage.setItem(PREF_RELIEF, JSON.stringify(reliefPrefs)); } catch (_) {}
+}
+
+function setToggle(btn, on) {
+    if (!btn) return;
+    btn.dataset.active = on ? 'true' : 'false';
+    btn.textContent = on ? 'ON' : 'OFF';
+}
+
+function syncReliefUI() {
+    setToggle(filterReliefBtn, reliefPrefs.enabled);
+    setToggle(filterReliefGlyphs, reliefPrefs.glyphs);
+    setToggle(filterReliefOrbit, reliefPrefs.autoOrbit);
+    if (filterReliefDepth) filterReliefDepth.value = reliefPrefs.depth;
+    if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
+}
+
+// True when the current stream can be drawn in 3D (binary cell frames).
+function reliefActive() {
+    return reliefPrefs.enabled && relief !== null && (pixelMode || renderMode > 1);
+}
+
+// Show either the 3D canvas or the 2D canvas + selection layer.
+function applyReliefVisibility() {
+    const on = reliefActive();
+    if (relief) relief.canvas.style.display = on ? 'block' : 'none';
+    canvas.style.visibility = on ? 'hidden' : '';
+    player.style.visibility = on ? 'hidden' : '';
+}
+
+// Called from buildCanvas on every INIT (new grid, mode or pixel switch).
+function applyReliefGrid() {
+    if (relief && gridCols > 0 && (pixelMode || renderMode > 1)) {
+        relief.setGrid(gridCols, gridRows, pixelMode ? 'bgr' : 'cell',
+            pixelMode ? 1 : charWidth / charHeight);
+    }
+    applyReliefVisibility();
+}
+
+function loadRelief() {
+    if (relief || reliefLoading) return reliefLoading || Promise.resolve(relief);
+    reliefLoading = import('/static/src/relief3d.js').then((mod) => {
+        if (!mod.isRelief3DSupported()) throw new Error('WebGL2 is not available in this browser');
+        relief = new mod.Relief3D(container, {
+            depth: reliefPrefs.depth, glyphs: reliefPrefs.glyphs, autoOrbit: reliefPrefs.autoOrbit,
+        });
+        applyReliefGrid();
+        return relief;
+    }).catch((err) => {
+        console.warn('3D relief unavailable:', err);
+        reliefPrefs.enabled = false;
+        saveReliefPrefs();
+        syncReliefUI();
+        if (filterReliefBtn) {
+            filterReliefBtn.disabled = true;
+            filterReliefBtn.title = '3D view unavailable: ' + err.message;
+        }
+        showToast('3D VIEW UNAVAILABLE');
+        return null;
+    }).finally(() => { reliefLoading = null; });
+    return reliefLoading;
+}
+
+syncReliefUI();
+if (reliefPrefs.enabled) loadRelief();
+
+if (filterReliefBtn) {
+    filterReliefBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reliefPrefs.enabled = !reliefPrefs.enabled;
+        saveReliefPrefs();
+        syncReliefUI();
+        if (reliefPrefs.enabled) loadRelief();
+        applyReliefVisibility();
+    });
+}
+if (filterReliefDepth) {
+    filterReliefDepth.addEventListener('input', () => {
+        reliefPrefs.depth = parseFloat(filterReliefDepth.value);
+        if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
+        if (relief) relief.set({ depth: reliefPrefs.depth });
+        saveReliefPrefs();
+    });
+}
+if (filterReliefGlyphs) {
+    filterReliefGlyphs.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reliefPrefs.glyphs = !reliefPrefs.glyphs;
+        setToggle(filterReliefGlyphs, reliefPrefs.glyphs);
+        if (relief) relief.set({ glyphs: reliefPrefs.glyphs });
+        saveReliefPrefs();
+    });
+}
+if (filterReliefOrbit) {
+    filterReliefOrbit.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reliefPrefs.autoOrbit = !reliefPrefs.autoOrbit;
+        setToggle(filterReliefOrbit, reliefPrefs.autoOrbit);
+        if (relief) relief.set({ autoOrbit: reliefPrefs.autoOrbit });
+        saveReliefPrefs();
+    });
+}
+if (filterReliefReset) {
+    filterReliefReset.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (relief) relief.resetView();
     });
 }
 
