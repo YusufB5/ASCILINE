@@ -22,6 +22,11 @@
  * Camera: drag to orbit, Shift/right/middle-drag to pan, wheel or pinch to
  * zoom; resetView() restores the default angle. A plain click is left to the
  * host page (the root player uses it for pause); a drag never reaches it.
+ *
+ * Touch modes react to the pointer: 'dent' presses cells down like sand,
+ * 'bump' raises them, 'repel' pushes blocks sideways out of the way, and
+ * 'ripple' sends a wave across the grid from every click (those clicks do not
+ * reach the host page).
  */
 
 const DEFAULTS = {
@@ -31,6 +36,8 @@ const DEFAULTS = {
     glyphs: true,      // draw characters on block tops in 'cell' and 'text' layouts
     invert: false,     // dark cells stand out instead of bright ones
     autoOrbit: false,  // gentle automatic camera sway
+    touch: 'off',      // 'off' | 'dent' | 'bump' | 'repel' | 'ripple'
+    touchRadius: 0.22, // pointer influence radius (grid height = 2)
     renderScale: 1.0,  // backing-store scale (lower = cheaper)
     maxPixelRatio: 2,
     background: [0.02, 0.02, 0.02],
@@ -41,6 +48,9 @@ const MIN_HEIGHT = 0.004;     // keeps black cells as visible tiles
 const FOV = 35 * Math.PI / 180;
 const DEFAULT_YAW = -0.38;
 const DEFAULT_PITCH = 0.30;
+const TOUCH_MODES = { off: 0, dent: 1, bump: 2, repel: 3, ripple: 4 };
+const MAX_RIPPLES = 8;
+const RIPPLE_LIFE = 3.2;       // seconds a wave stays visible
 
 const VERT = `#version 300 es
 precision highp float;
@@ -57,6 +67,11 @@ uniform float uGap;
 uniform float uInvert;
 uniform int uStyle;           // 0 = columns, 1 = floating tiles
 uniform mat4 uViewProj;
+uniform int uTouchMode;       // 1 dent, 2 bump, 3 repel (0/4: none)
+uniform vec3 uTouch;          // pointer x, y (world) and strength 0..1
+uniform float uTouchRadius;
+uniform float uTime;          // seconds, same clock as the ripple start times
+uniform vec4 uRipples[${MAX_RIPPLES}];  // x, y, start time, amplitude (0 = unused)
 
 out vec3 vColor;
 out vec3 vNormal;
@@ -74,15 +89,44 @@ void main() {
     lum = mix(lum, 1.0 - lum, uInvert);
     float h = max(lum * uDepth * ${DEPTH_UNIT.toFixed(4)}, ${MIN_HEIGHT.toFixed(4)});
 
+    vec2 half_ = vec2(uGrid) * uCell * 0.5;
+    vec2 center = vec2(-half_.x + (float(col) + 0.5) * uCell.x, half_.y - (float(row) + 0.5) * uCell.y);
+    vec2 shift = vec2(0.0);
+    float lift = ${DEPTH_UNIT.toFixed(4)} * max(uDepth, 0.6);
+
+    // Pointer: a soft Gaussian brush around the cursor.
+    if (uTouchMode >= 1 && uTouchMode <= 3 && uTouch.z > 0.0) {
+        vec2 away = center - uTouch.xy;
+        float d = length(away) / uTouchRadius;
+        float f = uTouch.z * exp(-d * d);
+        if (uTouchMode == 1) h = mix(h, ${MIN_HEIGHT.toFixed(4)}, 0.92 * f);
+        else if (uTouchMode == 2) h += f * lift * 1.4;
+        else {
+            shift = (length(away) > 1e-5 ? normalize(away) : vec2(0.0)) * f * uTouchRadius * 0.85;
+            h *= 1.0 - 0.45 * f;
+        }
+    }
+
+    // Ripples: expanding rings that lift the cells they pass over.
+    for (int i = 0; i < ${MAX_RIPPLES}; i++) {
+        vec4 r = uRipples[i];
+        if (r.w <= 0.0) continue;
+        float age = uTime - r.z;
+        if (age < 0.0 || age > ${RIPPLE_LIFE.toFixed(2)}) continue;
+        float ring = (length(center - r.xy) - age * 1.1) / 0.09;
+        float fade = (1.0 - age / ${RIPPLE_LIFE.toFixed(2)});
+        h += r.w * lift * 0.9 * exp(-ring * ring) * fade * fade;
+    }
+    h = max(h, ${MIN_HEIGHT.toFixed(4)});
+
     // Columns span 0..h; floating tiles are a thin slab whose top sits at h.
     float thick = uCell.y * 0.12;
     float z = uStyle == 1 ? h + (aPos.z - 1.0) * thick : aPos.z * h;
 
-    vec2 half_ = vec2(uGrid) * uCell * 0.5;
     vec2 inner = uGap * 0.5 + aPos.xy * (1.0 - uGap);
     vec3 world = vec3(
-        -half_.x + (float(col) + inner.x) * uCell.x,
-         half_.y - (float(row) + 1.0 - inner.y) * uCell.y,
+        -half_.x + (float(col) + inner.x) * uCell.x + shift.x,
+         half_.y - (float(row) + 1.0 - inner.y) * uCell.y + shift.y,
          z);
 
     vColor = color;
@@ -165,6 +209,34 @@ function lookAt(out, eye, target, up) {
     out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
     out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
     out[15] = 1;
+    return out;
+}
+
+function invert(out, m) {
+    const [a00, a01, a02, a03, a10, a11, a12, a13, a20, a21, a22, a23, a30, a31, a32, a33] = m;
+    const b00 = a00 * a11 - a01 * a10, b01 = a00 * a12 - a02 * a10, b02 = a00 * a13 - a03 * a10;
+    const b03 = a01 * a12 - a02 * a11, b04 = a01 * a13 - a03 * a11, b05 = a02 * a13 - a03 * a12;
+    const b06 = a20 * a31 - a21 * a30, b07 = a20 * a32 - a22 * a30, b08 = a20 * a33 - a23 * a30;
+    const b09 = a21 * a32 - a22 * a31, b10 = a21 * a33 - a23 * a31, b11 = a22 * a33 - a23 * a32;
+    const det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+    if (!det) return null;
+    const id = 1 / det;
+    out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * id;
+    out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * id;
+    out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * id;
+    out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * id;
+    out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * id;
+    out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * id;
+    out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * id;
+    out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * id;
+    out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * id;
+    out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * id;
+    out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * id;
+    out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * id;
+    out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * id;
+    out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * id;
+    out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * id;
+    out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * id;
     return out;
 }
 
@@ -251,6 +323,14 @@ export class Relief3D {
         this._viewProj = new Float32Array(16);
         this._proj = new Float32Array(16);
         this._view = new Float32Array(16);
+        this._invViewProj = new Float32Array(16);
+        this._hasInverse = false;
+        this._pointer = null;         // pointer in NDC while over the canvas
+        this._touchAmount = 0;        // eased 0..1 brush strength
+        this._lastFrameT = 0;
+        this._ripples = new Float32Array(MAX_RIPPLES * 4);
+        this._rippleNext = 0;
+        this._clockT0 = performance.now();
 
         this.canvas = document.createElement('canvas');
         this.canvas.className = 'asciline-relief3d';
@@ -326,8 +406,8 @@ export class Relief3D {
         if (this._raf !== null || this._disposed) return;
         this._raf = requestAnimationFrame((t) => {
             this._raf = null;
-            this._render(t);
-            if (this.opts.autoOrbit) this.requestRender();
+            const busy = this._render(t);
+            if (busy || this.opts.autoOrbit) this.requestRender();
         });
     }
 
@@ -383,7 +463,8 @@ export class Relief3D {
         this.program = prog;
         this.u = {};
         for (const name of ['uFrame', 'uLayout', 'uGrid', 'uCell', 'uDepth', 'uGap', 'uInvert',
-            'uViewProj', 'uAtlas', 'uGlyphs', 'uLight', 'uStyle']) {
+            'uViewProj', 'uAtlas', 'uGlyphs', 'uLight', 'uStyle',
+            'uTouchMode', 'uTouch', 'uTouchRadius', 'uTime', 'uRipples']) {
             this.u[name] = gl.getUniformLocation(prog, name);
         }
 
@@ -490,14 +571,15 @@ export class Relief3D {
         return d;
     }
 
+    // Returns true while an animation (brush easing, ripples) needs more frames.
     _render(now) {
         const gl = this.gl;
-        if (!gl || this._lost || this._disposed) return;
+        if (!gl || this._lost || this._disposed) return false;
         const [r, g, b] = this.opts.background;
         gl.viewport(0, 0, this.canvas.width, this.canvas.height);
         gl.clearColor(r, g, b, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-        if (!this.cols || !this._hasFrame) return;
+        if (!this.cols || !this._hasFrame) return false;
 
         let yaw = this.yaw, pitch = this.pitch;
         if (this.opts.autoOrbit) {
@@ -512,6 +594,24 @@ export class Relief3D {
         perspective(this._proj, FOV, this.canvas.width / this.canvas.height, d * 0.02, d * 6 + 10);
         lookAt(this._view, eye, tgt, [0, 1, 0]);
         multiply(this._viewProj, this._proj, this._view);
+        this._hasInverse = invert(this._invViewProj, this._viewProj) !== null;
+        this._touchPlaneZ = tz;
+
+        // Ease the brush in while the pointer is over the grid, out when it leaves.
+        const dt = this._lastFrameT ? Math.min(0.1, (now - this._lastFrameT) / 1000) : 0;
+        this._lastFrameT = now;
+        const mode = TOUCH_MODES[this.opts.touch] || 0;
+        const brush = mode >= 1 && mode <= 3 ? this._pointerWorld(this._pointer) : null;
+        const goal = brush ? 1 : 0;
+        this._touchAmount += (goal - this._touchAmount) * Math.min(1, dt * 9);
+        if (brush) this._touchXY = brush;
+        const time = (now - this._clockT0) / 1000;
+        let ripplesAlive = false;
+        for (let i = 0; i < MAX_RIPPLES; i++) {
+            const r = this._ripples;
+            if (r[i * 4 + 3] > 0 && time - r[i * 4 + 2] > RIPPLE_LIFE) r[i * 4 + 3] = 0;
+            if (r[i * 4 + 3] > 0) ripplesAlive = true;
+        }
 
         const { cellW, cellH } = this._gridSize();
         const u = this.u;
@@ -532,9 +632,44 @@ export class Relief3D {
         gl.uniform1i(u.uStyle, this.opts.style === 'floating' ? 1 : 0);
         gl.uniform3f(u.uLight, -0.55, 0.62, 0.56);
         gl.uniformMatrix4fv(u.uViewProj, false, this._viewProj);
+        const xy = this._touchXY || [0, 0];
+        gl.uniform1i(u.uTouchMode, mode);
+        gl.uniform3f(u.uTouch, xy[0], xy[1], this._touchAmount > 0.002 ? this._touchAmount : 0);
+        gl.uniform1f(u.uTouchRadius, this.opts.touchRadius);
+        gl.uniform1f(u.uTime, time);
+        gl.uniform4fv(u.uRipples, this._ripples);
         gl.bindVertexArray(this.vao);
         gl.drawArraysInstanced(gl.TRIANGLES, 0, this.vertexCount, this.cols * this.rows);
         gl.bindVertexArray(null);
+        return ripplesAlive || Math.abs(goal - this._touchAmount) > 0.002;
+    }
+
+    // Where the pointer ray meets the grid's mid-height plane, in world units.
+    _pointerWorld(ndc) {
+        if (!ndc || !this._hasInverse) return null;
+        const m = this._invViewProj;
+        const unproject = (z) => {
+            const x = ndc[0], y = ndc[1];
+            const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+            return [(m[0] * x + m[4] * y + m[8] * z + m[12]) / w,
+                (m[1] * x + m[5] * y + m[9] * z + m[13]) / w,
+                (m[2] * x + m[6] * y + m[10] * z + m[14]) / w];
+        };
+        const a = unproject(-1), b = unproject(1);
+        const dz = b[2] - a[2];
+        if (Math.abs(dz) < 1e-6) return null;
+        const s = (this._touchPlaneZ - a[2]) / dz;
+        if (s < 0) return null;
+        return [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s];
+    }
+
+    _spawnRipple(ndc) {
+        const at = this._pointerWorld(ndc);
+        if (!at) return;
+        const i = this._rippleNext;
+        this._rippleNext = (i + 1) % MAX_RIPPLES;
+        this._ripples.set([at[0], at[1], (performance.now() - this._clockT0) / 1000, 1], i * 4);
+        this.requestRender();
     }
 
     // ── Camera controls ──────────────────────────────────────────────────────
@@ -588,8 +723,17 @@ export class Relief3D {
             pointers.delete(e.pointerId);
             if (pointers.size === 0) { mode = null; el.style.cursor = 'grab'; }
         };
-        // A drag must not reach the host page as a click (the root player pauses on click).
-        const onClick = (e) => { if (moved > 4) { e.stopPropagation(); e.preventDefault(); } moved = 0; };
+        // A drag must not reach the host page as a click; neither does a click that makes a ripple.
+        const onClick = (e) => {
+            if (moved > 4) { e.stopPropagation(); e.preventDefault(); }
+            else if (this.opts.touch === 'ripple') {
+                this._spawnRipple(this._ndc(e));
+                e.stopPropagation(); e.preventDefault();
+            }
+            moved = 0;
+        };
+        const onHover = (e) => { this._pointer = this._ndc(e); if (this.opts.touch !== 'off') this.requestRender(); };
+        const onLeave = () => { this._pointer = null; this.requestRender(); };
         const onWheel = (e) => { e.preventDefault(); this._zoom(Math.exp(e.deltaY * 0.0012)); };
         const onCtx = (e) => e.preventDefault();
         const onLost = (e) => { e.preventDefault(); this._lost = true; };
@@ -597,6 +741,8 @@ export class Relief3D {
 
         el.addEventListener('pointerdown', onDown);
         el.addEventListener('pointermove', onMove);
+        el.addEventListener('pointermove', onHover);
+        el.addEventListener('pointerleave', onLeave);
         el.addEventListener('pointerup', onUp);
         el.addEventListener('pointercancel', onUp);
         el.addEventListener('click', onClick, true);
@@ -607,6 +753,8 @@ export class Relief3D {
         this._unbind = () => {
             el.removeEventListener('pointerdown', onDown);
             el.removeEventListener('pointermove', onMove);
+            el.removeEventListener('pointermove', onHover);
+            el.removeEventListener('pointerleave', onLeave);
             el.removeEventListener('pointerup', onUp);
             el.removeEventListener('pointercancel', onUp);
             el.removeEventListener('click', onClick, true);
@@ -615,6 +763,11 @@ export class Relief3D {
             el.removeEventListener('webglcontextlost', onLost);
             el.removeEventListener('webglcontextrestored', onRestored);
         };
+    }
+
+    _ndc(e) {
+        const r = this.canvas.getBoundingClientRect();
+        return [((e.clientX - r.left) / r.width) * 2 - 1, 1 - ((e.clientY - r.top) / r.height) * 2];
     }
 
     _zoom(factor) {

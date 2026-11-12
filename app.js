@@ -1199,10 +1199,12 @@ const reliefDepthVal     = document.getElementById('filter-relief-depth-val');
 const reliefOptions      = document.getElementById('relief-options');
 const paletteSection     = document.getElementById('palette-section');
 const filterReliefOrbit  = document.getElementById('filter-relief-orbit');
+const filterReliefTouch  = document.getElementById('filter-relief-touch');
+const RELIEF_TOUCH_MODES = ['off', 'dent', 'bump', 'repel', 'ripple'];
 const filterReliefReset  = document.getElementById('filter-relief-reset');
 
 // ASCII modes always show their characters on the block tops; pixel mode never has any.
-let reliefPrefs = { enabled: false, style: 'columns', depth: 1.0, autoOrbit: false };
+let reliefPrefs = { enabled: false, style: 'columns', depth: 1.0, autoOrbit: false, touch: 'off' };
 let relief = null;          // Relief3D instance once loaded
 let reliefLoading = null;   // pending import
 
@@ -1215,6 +1217,7 @@ try {
             style: saved.style === 'floating' ? 'floating' : 'columns',
             depth: Number.isFinite(depth) ? Math.min(4, Math.max(0, depth)) : 1.0,
             autoOrbit: Boolean(saved.autoOrbit),
+            touch: RELIEF_TOUCH_MODES.includes(saved.touch) ? saved.touch : 'off',
         };
     }
 } catch (_) { /* ignore unavailable storage or corrupt prefs */ }
@@ -1232,6 +1235,10 @@ function setToggle(btn, on) {
 function syncReliefUI() {
     setToggle(filterReliefBtn, reliefPrefs.enabled);
     setToggle(filterReliefOrbit, reliefPrefs.autoOrbit);
+    if (filterReliefTouch) {
+        filterReliefTouch.dataset.active = reliefPrefs.touch !== 'off' ? 'true' : 'false';
+        filterReliefTouch.textContent = reliefPrefs.touch.toUpperCase();
+    }
     if (filterReliefStyle) {
         filterReliefStyle.dataset.active = reliefPrefs.style === 'floating' ? 'true' : 'false';
         filterReliefStyle.textContent = reliefPrefs.style === 'floating' ? 'FLOATING' : 'COLUMNS';
@@ -1277,6 +1284,7 @@ function loadRelief() {
         if (!mod.isRelief3DSupported()) throw new Error('WebGL2 is not available in this browser');
         relief = new mod.Relief3D(container, {
             style: reliefPrefs.style, depth: reliefPrefs.depth, autoOrbit: reliefPrefs.autoOrbit,
+            touch: reliefPrefs.touch,
         });
         applyReliefGrid();
         return relief;
@@ -1322,6 +1330,16 @@ if (filterReliefDepth) {
         reliefPrefs.depth = parseFloat(filterReliefDepth.value);
         if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
         if (relief) relief.set({ depth: reliefPrefs.depth });
+        saveReliefPrefs();
+    });
+}
+if (filterReliefTouch) {
+    filterReliefTouch.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const next = (RELIEF_TOUCH_MODES.indexOf(reliefPrefs.touch) + 1) % RELIEF_TOUCH_MODES.length;
+        reliefPrefs.touch = RELIEF_TOUCH_MODES[next];
+        syncReliefUI();
+        if (relief) relief.set({ touch: reliefPrefs.touch });
         saveReliefPrefs();
     });
 }
