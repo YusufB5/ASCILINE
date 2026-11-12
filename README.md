@@ -61,6 +61,7 @@
 - **Master clock sync**: the audio track is the absolute time reference, keeping A/V synchronized.
 - **Low-overhead binary protocol**: frames are streamed as raw `Uint8Array` straight to the canvas.
 - **Compressed live pixel mode (DCT) + optional Rust engine**: an opt-in lossy codec streams pixel mode at roughly 0.1 MB/s instead of ~20 MB/s; the optional Rust engine raises pixel mode to 60 FPS. [Details](#optional-rust-engine--live-pixel-dct-preview-windows-tested)
+- **3D view**: the same live stream can be drawn as 3D blocks whose height follows brightness, with the ASCII characters kept on top. Switch it on in the player settings. [Details](#3d-view)
 - **Multiple color modes**: from black & white up to 16M-color high fidelity.
 - **Flexible video management**: JSON playlists (per-video mode & volume), folder-based auto-queuing, single-file mode, infinite loop — all via CLI flags.
 
@@ -612,6 +613,18 @@ Click **FX** on the player controls (or press **F**) to open the filter overlay.
   - `Default`: full detailed ASCII ramp
   - `Flat/Anime`: shortened, minimalist ramp (good for animation)
   - `Block`: chunky, dense characters for a retro-terminal look
+
+### 3D view
+
+Open the player settings (**FX** or **F**) and switch on **VIEW → 3D VIEW**. Every cell of the live stream becomes a block whose height follows its brightness. ASCII colour modes keep their characters on the block tops; pixel mode draws plain colour blocks. Nothing changes on the server: the browser redraws the same frames in 3D.
+
+- **Mouse:** drag to orbit, Shift-drag (or right-drag) to pan, wheel to zoom; a plain click still pauses.
+- **Touch:** drag to orbit, pinch to zoom.
+- **Style** — `Columns` rise from the floor as solid blocks; `Floating` tiles hover at their height.
+- **Depth** — how far bright cells rise (0 = flat).
+- **Orbit** — slow automatic camera sway; **⟲** resets the camera.
+
+The view uses WebGL2 and is loaded only when switched on; without WebGL2 the player stays 2D. Each frame is one texture upload and one draw call, so it runs smoothly on most desktop GPUs, but very large grids or weak devices may need fewer `--cols`. In text-only mode 1 (no colour data) each character's ink density sets its grey level and height. The module is `src/relief3d.js` and has no dependencies.
 
 ### Rendering modes
 

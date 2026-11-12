@@ -714,6 +714,20 @@ body {
     letter-spacing: 2px;
     transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
+/* Nested settings shown only while their parent switch is on (e.g. 3D view). */
+.filter-subgroup {
+    margin: -4px 0 4px 12px;
+    padding-left: 10px;
+    border-left: 1px solid #333;
+}
+.filter-subgroup[hidden],
+#palette-section[hidden] {
+    display: none;
+}
+.filter-icon-btn {
+    padding: 3px 9px;
+    letter-spacing: 0;
+}
 .filter-toggle-btn:hover {
     border-color: #777;
     color: #aaa;

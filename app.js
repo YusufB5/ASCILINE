@@ -177,6 +177,7 @@ function buildCanvas(cols, rows) {
         for (let c = 0; c < cols; c++) xPos[c] = c * charWidth;
         for (let r = 0; r < rows; r++) yPos[r] = r * charHeight;
     }
+    applyReliefGrid();
 }
 
 // ═══════════════════════════════════════
@@ -574,7 +575,19 @@ function renderFrame(now) {
 
     lastRenderTime = now;
 
-    if (pixelMode) {
+    if (reliefActive()) {
+        // 3D view: the frame bytes go to the GPU unchanged; the 2D layers are hidden.
+        relief.update(frame);
+        if (typeof frame === 'string') {
+            player.textContent = frame; // mode 1: keep "copy frame" current
+        } else if (!pixelMode) {
+            // Keep the hidden text layer current so "copy frame" still copies this frame.
+            for (let i = 0, cell = 0; i < frame.length; i += 4, cell++) {
+                selectionBuffer[Math.floor(cell / gridCols) * (gridCols + 1) + cell % gridCols] = frame[i];
+            }
+            player.textContent = textDecoder.decode(selectionBuffer);
+        }
+    } else if (pixelMode) {
         // ── ZERO-COPY PIXEL MODE ──
         // Server sends raw BGR (3 bytes/pixel). We swap B↔R here.
         const view = frame; // Already a Uint8Array
@@ -1168,6 +1181,163 @@ if (filterReset) {
         currentFilters = { contrast: 1.0, gamma: 1.0, brightness: 0, invert: false, sharpness: 0, palette: 'default' };
         syncFilterUI();
         sendFilters();
+    });
+}
+
+// ═══════════════════════════════════════
+//  3D RELIEF VIEW (src/relief3d.js, loaded on first use)
+// ═══════════════════════════════════════
+// The same decoded frames the 2D canvas draws are handed to a WebGL2 view
+// that turns every cell into a block. Off by default. Text-only mode 1 uses each
+// character's ink density as its brightness.
+
+const PREF_RELIEF = 'asciline_relief';
+const filterReliefBtn    = document.getElementById('filter-relief');
+const filterReliefDepth  = document.getElementById('filter-relief-depth');
+const filterReliefStyle  = document.getElementById('filter-relief-style');
+const reliefDepthVal     = document.getElementById('filter-relief-depth-val');
+const reliefOptions      = document.getElementById('relief-options');
+const paletteSection     = document.getElementById('palette-section');
+const filterReliefOrbit  = document.getElementById('filter-relief-orbit');
+const filterReliefReset  = document.getElementById('filter-relief-reset');
+
+// ASCII modes always show their characters on the block tops; pixel mode never has any.
+let reliefPrefs = { enabled: false, style: 'columns', depth: 1.0, autoOrbit: false };
+let relief = null;          // Relief3D instance once loaded
+let reliefLoading = null;   // pending import
+
+try {
+    const saved = JSON.parse(localStorage.getItem(PREF_RELIEF) || 'null');
+    if (saved && typeof saved === 'object') {
+        const depth = parseFloat(saved.depth);
+        reliefPrefs = {
+            enabled: Boolean(saved.enabled),
+            style: saved.style === 'floating' ? 'floating' : 'columns',
+            depth: Number.isFinite(depth) ? Math.min(4, Math.max(0, depth)) : 1.0,
+            autoOrbit: Boolean(saved.autoOrbit),
+        };
+    }
+} catch (_) { /* ignore unavailable storage or corrupt prefs */ }
+
+function saveReliefPrefs() {
+    try { localStorage.setItem(PREF_RELIEF, JSON.stringify(reliefPrefs)); } catch (_) {}
+}
+
+function setToggle(btn, on) {
+    if (!btn) return;
+    btn.dataset.active = on ? 'true' : 'false';
+    btn.textContent = on ? 'ON' : 'OFF';
+}
+
+function syncReliefUI() {
+    setToggle(filterReliefBtn, reliefPrefs.enabled);
+    setToggle(filterReliefOrbit, reliefPrefs.autoOrbit);
+    if (filterReliefStyle) {
+        filterReliefStyle.dataset.active = reliefPrefs.style === 'floating' ? 'true' : 'false';
+        filterReliefStyle.textContent = reliefPrefs.style === 'floating' ? 'FLOATING' : 'COLUMNS';
+    }
+    if (filterReliefDepth) filterReliefDepth.value = reliefPrefs.depth;
+    if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
+    syncFilterSections();
+}
+
+// Hide settings that do nothing right now: 3D options while 3D is off, the
+// ASCII palette in pixel mode.
+function syncFilterSections() {
+    if (reliefOptions) reliefOptions.hidden = !reliefPrefs.enabled;
+    if (paletteSection) paletteSection.hidden = pixelMode;
+}
+
+// True when 3D is on and loaded (every mode can be drawn in 3D).
+function reliefActive() {
+    return reliefPrefs.enabled && relief !== null;
+}
+
+// Show either the 3D canvas or the 2D canvas + selection layer.
+function applyReliefVisibility() {
+    const on = reliefActive();
+    if (relief) relief.canvas.style.display = on ? 'block' : 'none';
+    canvas.style.visibility = on ? 'hidden' : '';
+    player.style.visibility = on ? 'hidden' : '';
+}
+
+// Called from buildCanvas on every INIT (new grid, mode or pixel switch).
+function applyReliefGrid() {
+    if (relief && gridCols > 0) {
+        const layout = pixelMode ? 'bgr' : renderMode > 1 ? 'cell' : 'text';
+        relief.setGrid(gridCols, gridRows, layout, pixelMode ? 1 : charWidth / charHeight);
+    }
+    applyReliefVisibility();
+    syncFilterSections();
+}
+
+function loadRelief() {
+    if (relief || reliefLoading) return reliefLoading || Promise.resolve(relief);
+    reliefLoading = import('/static/src/relief3d.js').then((mod) => {
+        if (!mod.isRelief3DSupported()) throw new Error('WebGL2 is not available in this browser');
+        relief = new mod.Relief3D(container, {
+            style: reliefPrefs.style, depth: reliefPrefs.depth, autoOrbit: reliefPrefs.autoOrbit,
+        });
+        applyReliefGrid();
+        return relief;
+    }).catch((err) => {
+        console.warn('3D relief unavailable:', err);
+        reliefPrefs.enabled = false;
+        saveReliefPrefs();
+        syncReliefUI();
+        if (filterReliefBtn) {
+            filterReliefBtn.disabled = true;
+            filterReliefBtn.title = '3D view unavailable: ' + err.message;
+        }
+        showToast('3D VIEW UNAVAILABLE');
+        return null;
+    }).finally(() => { reliefLoading = null; });
+    return reliefLoading;
+}
+
+syncReliefUI();
+if (reliefPrefs.enabled) loadRelief();
+
+if (filterReliefBtn) {
+    filterReliefBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reliefPrefs.enabled = !reliefPrefs.enabled;
+        saveReliefPrefs();
+        syncReliefUI();
+        if (reliefPrefs.enabled) loadRelief();
+        applyReliefVisibility();
+    });
+}
+if (filterReliefStyle) {
+    filterReliefStyle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reliefPrefs.style = reliefPrefs.style === 'floating' ? 'columns' : 'floating';
+        syncReliefUI();
+        if (relief) relief.set({ style: reliefPrefs.style });
+        saveReliefPrefs();
+    });
+}
+if (filterReliefDepth) {
+    filterReliefDepth.addEventListener('input', () => {
+        reliefPrefs.depth = parseFloat(filterReliefDepth.value);
+        if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
+        if (relief) relief.set({ depth: reliefPrefs.depth });
+        saveReliefPrefs();
+    });
+}
+if (filterReliefOrbit) {
+    filterReliefOrbit.addEventListener('click', (e) => {
+        e.stopPropagation();
+        reliefPrefs.autoOrbit = !reliefPrefs.autoOrbit;
+        setToggle(filterReliefOrbit, reliefPrefs.autoOrbit);
+        if (relief) relief.set({ autoOrbit: reliefPrefs.autoOrbit });
+        saveReliefPrefs();
+    });
+}
+if (filterReliefReset) {
+    filterReliefReset.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (relief) relief.resetView();
     });
 }
 
