@@ -9,11 +9,14 @@
  * Frame layouts (the same bytes the 2D renderers draw):
  *   'bgr'  — pixel mode, 3 bytes per cell: B, G, R
  *   'cell' — ASCII colour modes 2–6, 4 bytes per cell: char code, R, G, B
+ *   'text' — text-only mode 1, a string of rows separated by '
+'; each
+ *            character's ink density sets its grey level and height
  *
  * Styles: 'columns' extrude each cell from the base plane into a solid block;
  * 'floating' draws a thin tile at the same height, so cells hover in space.
  *
- * In 'cell' layout the block tops can show the cell's character (glyphs), so
+ * In 'cell' and 'text' layouts the block tops show the cell's character, so
  * the 3D view keeps the ASCII text instead of only its colour.
  *
  * Camera: drag to orbit, Shift/right/middle-drag to pan, wheel or pinch to
@@ -25,7 +28,7 @@ const DEFAULTS = {
     depth: 1.0,        // block height scale (0 = flat)
     style: 'columns',  // 'columns' rise from the base; 'floating' thin tiles hover at their height
     gap: 0.06,         // gap between blocks, as a fraction of a cell
-    glyphs: true,      // draw characters on block tops in 'cell' layout
+    glyphs: true,      // draw characters on block tops in 'cell' and 'text' layouts
     invert: false,     // dark cells stand out instead of bright ones
     autoOrbit: false,  // gentle automatic camera sway
     renderScale: 1.0,  // backing-store scale (lower = cheaper)
@@ -175,6 +178,10 @@ function multiply(out, a, b) {
     return out;
 }
 
+// Ink coverage of each printable ASCII glyph (0..1, '@' ≈ 1, space = 0),
+// measured from the atlas; gives text-only frames a brightness per cell.
+let glyphDensity = null;
+
 function buildAtlas() {
     const size = 32, atlas = document.createElement('canvas');
     atlas.width = 16 * size; atlas.height = 8 * size;
@@ -185,6 +192,22 @@ function buildAtlas() {
     g.textBaseline = 'middle';
     for (let code = 33; code < 127; code++) {
         g.fillText(String.fromCharCode(code), (code % 16 + 0.5) * size, (Math.floor(code / 16) + 0.54) * size);
+    }
+    if (!glyphDensity) {
+        const px = g.getImageData(0, 0, atlas.width, atlas.height).data;
+        const ink = new Float32Array(128);
+        let max = 0;
+        for (let code = 33; code < 127; code++) {
+            const x0 = (code % 16) * size, y0 = Math.floor(code / 16) * size;
+            let sum = 0;
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) sum += px[((y0 + y) * atlas.width + x0 + x) * 4 + 3];
+            }
+            ink[code] = sum;
+            if (sum > max) max = sum;
+        }
+        for (let code = 0; code < 128; code++) ink[code] = max ? ink[code] / max : 0;
+        glyphDensity = ink;
     }
     return atlas;
 }
@@ -247,7 +270,7 @@ export class Relief3D {
 
     // ── Public API ───────────────────────────────────────────────────────────
 
-    /** Set grid size and byte layout ('bgr' | 'cell'); cellAspect = cell width / height. */
+    /** Set grid size and layout ('bgr' | 'cell' | 'text'); cellAspect = cell width / height. */
     setGrid(cols, rows, layout, cellAspect = 1) {
         const changed = cols !== this.cols || rows !== this.rows || layout !== this.layout;
         this.cols = cols;
@@ -263,8 +286,16 @@ export class Relief3D {
         this.requestRender();
     }
 
-    /** Upload one decoded frame (Uint8Array in the current layout). */
+    /** Upload one decoded frame (Uint8Array, or a string in 'text' layout). */
     update(frame) {
+        if (this.layout === 'text') {
+            if (typeof frame !== 'string' || !this.cols) return false;
+            this._fillFromText(frame);
+            this._hasFrame = true;
+            if (!this._lost) this._uploadFrame();
+            this.requestRender();
+            return true;
+        }
         const expected = this.cols * this.rows * this._bpp();
         if (!this.cols || !frame || frame.length !== expected) return false;
         this._frame.set(frame);
@@ -318,7 +349,24 @@ export class Relief3D {
 
     // ── GL setup ─────────────────────────────────────────────────────────────
 
-    _bpp() { return this.layout === 'cell' ? 4 : 3; }
+    _bpp() { return this.layout === 'bgr' ? 3 : 4; }
+
+    // Text rows -> [char, grey, grey, grey] cells; short rows are padded with spaces.
+    _fillFromText(text) {
+        const out = this._frame, cols = this.cols, rows = this.rows, ink = glyphDensity;
+        let i = 0, col = 0, row = 0;
+        out.fill(0);
+        for (let k = 0; k < text.length && row < rows; k++) {
+            const c = text.charCodeAt(k);
+            if (c === 10) { row++; col = 0; continue; }
+            if (c === 13 || col >= cols) continue;
+            const code = c < 128 ? c : 64;
+            const grey = code > 32 ? Math.round(48 + 207 * (ink ? ink[code] : 1)) : 0;
+            i = (row * cols + col) * 4;
+            out[i] = code; out[i + 1] = grey; out[i + 2] = grey; out[i + 3] = grey;
+            col++;
+        }
+    }
 
     _initGL() {
         const gl = this.canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
@@ -375,7 +423,7 @@ export class Relief3D {
     _allocFrameTexture() {
         const gl = this.gl;
         if (!gl || this._lost) return;
-        const cell = this.layout === 'cell';
+        const cell = this.layout !== 'bgr';
         gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
         gl.texImage2D(gl.TEXTURE_2D, 0, cell ? gl.RGBA8 : gl.RGB8, this.cols, this.rows, 0,
@@ -391,7 +439,7 @@ export class Relief3D {
         gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.cols, this.rows,
-            this.layout === 'cell' ? gl.RGBA : gl.RGB, gl.UNSIGNED_BYTE, this._frame);
+            this.layout === 'bgr' ? gl.RGB : gl.RGBA, gl.UNSIGNED_BYTE, this._frame);
     }
 
     _resize() {
@@ -474,8 +522,8 @@ export class Relief3D {
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, this.atlasTex);
         gl.uniform1i(u.uAtlas, 1);
-        gl.uniform1i(u.uLayout, this.layout === 'cell' ? 1 : 0);
-        gl.uniform1i(u.uGlyphs, this.layout === 'cell' && this.opts.glyphs ? 1 : 0);
+        gl.uniform1i(u.uLayout, this.layout === 'bgr' ? 0 : 1);
+        gl.uniform1i(u.uGlyphs, this.layout !== 'bgr' && this.opts.glyphs ? 1 : 0);
         gl.uniform2i(u.uGrid, this.cols, this.rows);
         gl.uniform2f(u.uCell, cellW, cellH);
         gl.uniform1f(u.uDepth, this.opts.depth);

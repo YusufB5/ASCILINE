@@ -624,7 +624,7 @@ Open the player settings (**FX** or **F**) and switch on **VIEW → 3D VIEW**. E
 - **Depth** — how far bright cells rise (0 = flat).
 - **Orbit** — slow automatic camera sway; **⟲** resets the camera.
 
-The view uses WebGL2 and is loaded only when switched on; without WebGL2 the player stays 2D. Each frame is one texture upload and one draw call, so it runs smoothly on most desktop GPUs, but very large grids or weak devices may need fewer `--cols`. Text-only mode 1 stays 2D. The module is `src/relief3d.js` and has no dependencies.
+The view uses WebGL2 and is loaded only when switched on; without WebGL2 the player stays 2D. Each frame is one texture upload and one draw call, so it runs smoothly on most desktop GPUs, but very large grids or weak devices may need fewer `--cols`. In text-only mode 1 (no colour data) each character's ink density sets its grey level and height. The module is `src/relief3d.js` and has no dependencies.
 
 ### Rendering modes
 

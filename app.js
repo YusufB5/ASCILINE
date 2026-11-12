@@ -578,7 +578,9 @@ function renderFrame(now) {
     if (reliefActive()) {
         // 3D view: the frame bytes go to the GPU unchanged; the 2D layers are hidden.
         relief.update(frame);
-        if (!pixelMode) {
+        if (typeof frame === 'string') {
+            player.textContent = frame; // mode 1: keep "copy frame" current
+        } else if (!pixelMode) {
             // Keep the hidden text layer current so "copy frame" still copies this frame.
             for (let i = 0, cell = 0; i < frame.length; i += 4, cell++) {
                 selectionBuffer[Math.floor(cell / gridCols) * (gridCols + 1) + cell % gridCols] = frame[i];
@@ -1186,7 +1188,8 @@ if (filterReset) {
 //  3D RELIEF VIEW (src/relief3d.js, loaded on first use)
 // ═══════════════════════════════════════
 // The same decoded frames the 2D canvas draws are handed to a WebGL2 view
-// that turns every cell into a block. Off by default; text-only mode 1 stays 2D.
+// that turns every cell into a block. Off by default. Text-only mode 1 uses each
+// character's ink density as its brightness.
 
 const PREF_RELIEF = 'asciline_relief';
 const filterReliefBtn    = document.getElementById('filter-relief');
@@ -1245,9 +1248,9 @@ function syncFilterSections() {
     if (paletteSection) paletteSection.hidden = pixelMode;
 }
 
-// True when the current stream can be drawn in 3D (binary cell frames).
+// True when 3D is on and loaded (every mode can be drawn in 3D).
 function reliefActive() {
-    return reliefPrefs.enabled && relief !== null && (pixelMode || renderMode > 1);
+    return reliefPrefs.enabled && relief !== null;
 }
 
 // Show either the 3D canvas or the 2D canvas + selection layer.
@@ -1260,9 +1263,9 @@ function applyReliefVisibility() {
 
 // Called from buildCanvas on every INIT (new grid, mode or pixel switch).
 function applyReliefGrid() {
-    if (relief && gridCols > 0 && (pixelMode || renderMode > 1)) {
-        relief.setGrid(gridCols, gridRows, pixelMode ? 'bgr' : 'cell',
-            pixelMode ? 1 : charWidth / charHeight);
+    if (relief && gridCols > 0) {
+        const layout = pixelMode ? 'bgr' : renderMode > 1 ? 'cell' : 'text';
+        relief.setGrid(gridCols, gridRows, layout, pixelMode ? 1 : charWidth / charHeight);
     }
     applyReliefVisibility();
     syncFilterSections();
