@@ -1200,11 +1200,14 @@ const reliefOptions      = document.getElementById('relief-options');
 const paletteSection     = document.getElementById('palette-section');
 const filterReliefOrbit  = document.getElementById('filter-relief-orbit');
 const filterReliefTouch  = document.getElementById('filter-relief-touch');
+const reliefPowerRow     = document.getElementById('relief-touch-power');
+const filterReliefPower  = document.getElementById('filter-relief-power');
+const reliefPowerVal     = document.getElementById('filter-relief-power-val');
 const RELIEF_TOUCH_MODES = ['off', 'dent', 'bump', 'repel', 'ripple'];
 const filterReliefReset  = document.getElementById('filter-relief-reset');
 
 // ASCII modes always show their characters on the block tops; pixel mode never has any.
-let reliefPrefs = { enabled: false, style: 'columns', depth: 1.0, autoOrbit: false, touch: 'off' };
+let reliefPrefs = { enabled: false, style: 'columns', depth: 1.0, autoOrbit: false, touch: 'off', touchStrength: 1.0 };
 let relief = null;          // Relief3D instance once loaded
 let reliefLoading = null;   // pending import
 
@@ -1218,6 +1221,8 @@ try {
             depth: Number.isFinite(depth) ? Math.min(4, Math.max(0, depth)) : 1.0,
             autoOrbit: Boolean(saved.autoOrbit),
             touch: RELIEF_TOUCH_MODES.includes(saved.touch) ? saved.touch : 'off',
+            touchStrength: Number.isFinite(parseFloat(saved.touchStrength))
+                ? Math.min(3, Math.max(0.2, parseFloat(saved.touchStrength))) : 1.0,
         };
     }
 } catch (_) { /* ignore unavailable storage or corrupt prefs */ }
@@ -1245,6 +1250,8 @@ function syncReliefUI() {
     }
     if (filterReliefDepth) filterReliefDepth.value = reliefPrefs.depth;
     if (reliefDepthVal) reliefDepthVal.textContent = reliefPrefs.depth.toFixed(2);
+    if (filterReliefPower) filterReliefPower.value = reliefPrefs.touchStrength;
+    if (reliefPowerVal) reliefPowerVal.textContent = reliefPrefs.touchStrength.toFixed(2);
     syncFilterSections();
 }
 
@@ -1252,6 +1259,7 @@ function syncReliefUI() {
 // ASCII palette in pixel mode.
 function syncFilterSections() {
     if (reliefOptions) reliefOptions.hidden = !reliefPrefs.enabled;
+    if (reliefPowerRow) reliefPowerRow.hidden = reliefPrefs.touch === 'off';
     if (paletteSection) paletteSection.hidden = pixelMode;
 }
 
@@ -1284,7 +1292,7 @@ function loadRelief() {
         if (!mod.isRelief3DSupported()) throw new Error('WebGL2 is not available in this browser');
         relief = new mod.Relief3D(container, {
             style: reliefPrefs.style, depth: reliefPrefs.depth, autoOrbit: reliefPrefs.autoOrbit,
-            touch: reliefPrefs.touch,
+            touch: reliefPrefs.touch, touchStrength: reliefPrefs.touchStrength,
         });
         applyReliefGrid();
         return relief;
@@ -1340,6 +1348,14 @@ if (filterReliefTouch) {
         reliefPrefs.touch = RELIEF_TOUCH_MODES[next];
         syncReliefUI();
         if (relief) relief.set({ touch: reliefPrefs.touch });
+        saveReliefPrefs();
+    });
+}
+if (filterReliefPower) {
+    filterReliefPower.addEventListener('input', () => {
+        reliefPrefs.touchStrength = parseFloat(filterReliefPower.value);
+        if (reliefPowerVal) reliefPowerVal.textContent = reliefPrefs.touchStrength.toFixed(2);
+        if (relief) relief.set({ touchStrength: reliefPrefs.touchStrength });
         saveReliefPrefs();
     });
 }

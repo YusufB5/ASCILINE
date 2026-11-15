@@ -38,6 +38,7 @@ const DEFAULTS = {
     autoOrbit: false,  // gentle automatic camera sway
     touch: 'off',      // 'off' | 'dent' | 'bump' | 'repel' | 'ripple'
     touchRadius: 0.22, // pointer influence radius (grid height = 2)
+    touchStrength: 1.0, // overall power of the touch effects (0.2 subtle .. 3 extreme)
     renderScale: 1.0,  // backing-store scale (lower = cheaper)
     maxPixelRatio: 2,
     background: [0.02, 0.02, 0.02],
@@ -70,6 +71,7 @@ uniform mat4 uViewProj;
 uniform int uTouchMode;       // 1 dent, 2 bump, 3 repel (0/4: none)
 uniform vec3 uTouch;          // pointer x, y (world) and strength 0..1
 uniform float uTouchRadius;
+uniform float uTouchStrength;
 uniform float uTime;          // seconds, same clock as the ripple start times
 uniform vec4 uRipples[${MAX_RIPPLES}];  // x, y, start time, amplitude (0 = unused)
 
@@ -99,11 +101,12 @@ void main() {
         vec2 away = center - uTouch.xy;
         float d = length(away) / uTouchRadius;
         float f = uTouch.z * exp(-d * d);
-        if (uTouchMode == 1) h = mix(h, ${MIN_HEIGHT.toFixed(4)}, 0.92 * f);
-        else if (uTouchMode == 2) h += f * lift * 1.4;
+        float s = uTouchStrength;
+        if (uTouchMode == 1) h = mix(h, ${MIN_HEIGHT.toFixed(4)}, clamp(0.92 * f * s, 0.0, 1.0));
+        else if (uTouchMode == 2) h += f * lift * 1.4 * s;
         else {
-            shift = (length(away) > 1e-5 ? normalize(away) : vec2(0.0)) * f * uTouchRadius * 0.85;
-            h *= 1.0 - 0.45 * f;
+            shift = (length(away) > 1e-5 ? normalize(away) : vec2(0.0)) * f * uTouchRadius * 0.85 * s;
+            h *= 1.0 - clamp(0.45 * f * s, 0.0, 0.95);
         }
     }
 
@@ -115,7 +118,7 @@ void main() {
         if (age < 0.0 || age > ${RIPPLE_LIFE.toFixed(2)}) continue;
         float ring = (length(center - r.xy) - age * 1.1) / 0.09;
         float fade = (1.0 - age / ${RIPPLE_LIFE.toFixed(2)});
-        h += r.w * lift * 0.9 * exp(-ring * ring) * fade * fade;
+        h += r.w * uTouchStrength * lift * 0.9 * exp(-ring * ring) * fade * fade;
     }
     h = max(h, ${MIN_HEIGHT.toFixed(4)});
 
@@ -464,7 +467,7 @@ export class Relief3D {
         this.u = {};
         for (const name of ['uFrame', 'uLayout', 'uGrid', 'uCell', 'uDepth', 'uGap', 'uInvert',
             'uViewProj', 'uAtlas', 'uGlyphs', 'uLight', 'uStyle',
-            'uTouchMode', 'uTouch', 'uTouchRadius', 'uTime', 'uRipples']) {
+            'uTouchMode', 'uTouch', 'uTouchRadius', 'uTouchStrength', 'uTime', 'uRipples']) {
             this.u[name] = gl.getUniformLocation(prog, name);
         }
 
@@ -636,6 +639,7 @@ export class Relief3D {
         gl.uniform1i(u.uTouchMode, mode);
         gl.uniform3f(u.uTouch, xy[0], xy[1], this._touchAmount > 0.002 ? this._touchAmount : 0);
         gl.uniform1f(u.uTouchRadius, this.opts.touchRadius);
+        gl.uniform1f(u.uTouchStrength, Math.min(3, Math.max(0, this.opts.touchStrength)));
         gl.uniform1f(u.uTime, time);
         gl.uniform4fv(u.uRipples, this._ripples);
         gl.bindVertexArray(this.vao);
