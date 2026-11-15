@@ -1203,7 +1203,7 @@ const filterReliefTouch  = document.getElementById('filter-relief-touch');
 const reliefPowerRow     = document.getElementById('relief-touch-power');
 const filterReliefPower  = document.getElementById('filter-relief-power');
 const reliefPowerVal     = document.getElementById('filter-relief-power-val');
-const RELIEF_TOUCH_MODES = ['off', 'dent', 'bump', 'repel', 'ripple'];
+const RELIEF_TOUCH_MODES = ['off', 'hole', 'bump', 'repel', 'ripple'];
 const filterReliefReset  = document.getElementById('filter-relief-reset');
 
 // ASCII modes always show their characters on the block tops; pixel mode never has any.
@@ -1220,7 +1220,8 @@ try {
             style: saved.style === 'floating' ? 'floating' : 'columns',
             depth: Number.isFinite(depth) ? Math.min(4, Math.max(0, depth)) : 1.0,
             autoOrbit: Boolean(saved.autoOrbit),
-            touch: RELIEF_TOUCH_MODES.includes(saved.touch) ? saved.touch : 'off',
+            touch: RELIEF_TOUCH_MODES.includes(saved.touch) ? saved.touch
+                : saved.touch === 'dent' ? 'hole' : 'off',   // 'dent' was renamed
             touchStrength: Number.isFinite(parseFloat(saved.touchStrength))
                 ? Math.min(3, Math.max(0.2, parseFloat(saved.touchStrength))) : 1.0,
         };

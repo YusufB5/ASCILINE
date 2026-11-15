@@ -23,8 +23,8 @@
  * zoom; resetView() restores the default angle. A plain click is left to the
  * host page (the root player uses it for pause); a drag never reaches it.
  *
- * Touch modes react to the pointer: 'dent' presses cells down like sand,
- * 'bump' raises them, 'repel' pushes blocks sideways out of the way, and
+ * Touch modes react to the pointer: 'hole' is a black hole that spirals cells
+ * in and sinks them, 'bump' raises them, 'repel' pushes blocks sideways out of the way, and
  * 'ripple' sends a wave across the grid from every click (those clicks do not
  * reach the host page).
  */
@@ -36,7 +36,7 @@ const DEFAULTS = {
     glyphs: true,      // draw characters on block tops in 'cell' and 'text' layouts
     invert: false,     // dark cells stand out instead of bright ones
     autoOrbit: false,  // gentle automatic camera sway
-    touch: 'off',      // 'off' | 'dent' | 'bump' | 'repel' | 'ripple'
+    touch: 'off',      // 'off' | 'hole' | 'bump' | 'repel' | 'ripple'
     touchRadius: 0.22, // pointer influence radius (grid height = 2)
     touchStrength: 1.0, // overall power of the touch effects (0.2 subtle .. 3 extreme)
     renderScale: 1.0,  // backing-store scale (lower = cheaper)
@@ -49,7 +49,7 @@ const MIN_HEIGHT = 0.004;     // keeps black cells as visible tiles
 const FOV = 35 * Math.PI / 180;
 const DEFAULT_YAW = -0.38;
 const DEFAULT_PITCH = 0.30;
-const TOUCH_MODES = { off: 0, dent: 1, bump: 2, repel: 3, ripple: 4 };
+const TOUCH_MODES = { off: 0, hole: 1, bump: 2, repel: 3, ripple: 4 };
 const MAX_RIPPLES = 8;
 const RIPPLE_LIFE = 3.2;       // seconds a wave stays visible
 
@@ -68,7 +68,7 @@ uniform float uGap;
 uniform float uInvert;
 uniform int uStyle;           // 0 = columns, 1 = floating tiles
 uniform mat4 uViewProj;
-uniform int uTouchMode;       // 1 dent, 2 bump, 3 repel (0/4: none)
+uniform int uTouchMode;       // 1 hole, 2 bump, 3 repel (0/4: none)
 uniform vec3 uTouch;          // pointer x, y (world) and strength 0..1
 uniform float uTouchRadius;
 uniform float uTouchStrength;
@@ -97,16 +97,35 @@ void main() {
     float lift = ${DEPTH_UNIT.toFixed(4)} * max(uDepth, 0.6);
 
     // Pointer: a soft Gaussian brush around the cursor.
+    float dark = 0.0;   // 0..1, how much the hole swallows a cell's colour
+    float rim = 0.0;    // 0..1, accretion-ring glow
     if (uTouchMode >= 1 && uTouchMode <= 3 && uTouch.z > 0.0) {
         vec2 away = center - uTouch.xy;
-        float d = length(away) / uTouchRadius;
-        float f = uTouch.z * exp(-d * d);
         float s = uTouchStrength;
-        if (uTouchMode == 1) h = mix(h, ${MIN_HEIGHT.toFixed(4)}, clamp(0.92 * f * s, 0.0, 1.0));
-        else if (uTouchMode == 2) h += f * lift * 1.4 * s;
-        else {
-            shift = (length(away) > 1e-5 ? normalize(away) : vec2(0.0)) * f * uTouchRadius * 0.85 * s;
-            h *= 1.0 - clamp(0.45 * f * s, 0.0, 0.95);
+        if (uTouchMode == 1) {
+            // Black hole: cells spiral into the pointer, the middle sinks and
+            // goes dark, and an orange rim glows at the event horizon.
+            float R = uTouchRadius * 1.8;
+            float dist = length(away);
+            float f = uTouch.z * exp(-(dist * dist) / (R * R));
+            float pull = clamp(f * s * 0.97, 0.0, 0.985);
+            float ang = f * s * 2.6;
+            float ca = cos(ang), sa = sin(ang);
+            vec2 spiral = vec2(ca * away.x - sa * away.y, sa * away.x + ca * away.y) * (1.0 - pull);
+            shift = uTouch.xy + spiral - center;
+            h *= 1.0 - clamp(f * s * 1.15, 0.0, 1.0);
+            // The glow band sits just outside the dark core, whatever the strength.
+            dark = smoothstep(0.62, 0.95, pull);
+            rim = smoothstep(0.2, 0.55, pull) * (1.0 - smoothstep(0.62, 0.92, pull));
+            h += rim * lift * 0.35;
+        } else {
+            float d = length(away) / uTouchRadius;
+            float f = uTouch.z * exp(-d * d);
+            if (uTouchMode == 2) h += f * lift * 1.4 * s;
+            else {
+                shift = (length(away) > 1e-5 ? normalize(away) : vec2(0.0)) * f * uTouchRadius * 0.85 * s;
+                h *= 1.0 - clamp(0.45 * f * s, 0.0, 0.95);
+            }
         }
     }
 
@@ -132,7 +151,7 @@ void main() {
          half_.y - (float(row) + 1.0 - inner.y) * uCell.y + shift.y,
          z);
 
-    vColor = color;
+    vColor = mix(color, color * vec3(1.0, 0.62, 0.3) * 1.7 + vec3(0.12, 0.05, 0.0), clamp(rim, 0.0, 1.0)) * (1.0 - 0.96 * dark);
     vNormal = aNormal;
     vUV = vec2(aPos.x, 1.0 - aPos.y);
     gl_Position = uViewProj * vec4(world, 1.0);
