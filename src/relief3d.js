@@ -25,8 +25,9 @@
  *
  * Touch modes react to the pointer: 'hole' is a black hole that spirals cells
  * in and sinks them, 'bump' raises them, 'repel' pushes blocks sideways out of the way, and
- * 'ripple' sends a wave across the grid from every click (those clicks do not
- * reach the host page).
+ * 'ripple' sends a wave across the grid from every click. In 'hole' mode a
+ * click collapses the whole grid into the black hole and blasts it back out.
+ * (Clicks used by these modes do not reach the host page.)
  */
 
 const DEFAULTS = {
@@ -52,6 +53,11 @@ const DEFAULT_PITCH = 0.30;
 const TOUCH_MODES = { off: 0, hole: 1, bump: 2, repel: 3, ripple: 4 };
 const MAX_RIPPLES = 8;
 const RIPPLE_LIFE = 3.2;       // seconds a wave stays visible
+// Black-hole collapse started by a click in HOLE mode (seconds): the grid is
+// eaten from the click outward, hangs as an ember for a beat, then bursts back out.
+const BANG_SUCK = 2.4, BANG_VOID = 0.4, BANG_BLAST = 1.6;
+const BANG_TOTAL = BANG_SUCK + BANG_VOID + BANG_BLAST;
+const EMBER_RADIUS = 0.21;     // world radius of the ball the picture is squeezed into
 
 const VERT = `#version 300 es
 precision highp float;
@@ -74,6 +80,7 @@ uniform float uTouchRadius;
 uniform float uTouchStrength;
 uniform float uTime;          // seconds, same clock as the ripple start times
 uniform vec4 uRipples[${MAX_RIPPLES}];  // x, y, start time, amplitude (0 = unused)
+uniform vec4 uBang;           // x, y, start time, max radius (0 = idle)
 
 out vec3 vColor;
 out vec3 vNormal;
@@ -99,6 +106,7 @@ void main() {
     // Pointer: a soft Gaussian brush around the cursor.
     float dark = 0.0;   // 0..1, how much the hole swallows a cell's colour
     float rim = 0.0;    // 0..1, accretion-ring glow
+    float zOff = 0.0;   // lifts a whole block off the floor (flying debris)
     if (uTouchMode >= 1 && uTouchMode <= 3 && uTouch.z > 0.0) {
         vec2 away = center - uTouch.xy;
         float s = uTouchStrength;
@@ -129,6 +137,60 @@ void main() {
         }
     }
 
+    // Click in HOLE mode: collapse, ember, blast, regrow. Every cell follows the
+    // same timeline, offset by its distance from the click.
+    float bangAge = uBang.w > 0.0 ? uTime - uBang.z : -1.0;
+    if (bangAge >= 0.0 && bangAge < ${BANG_TOTAL.toFixed(3)}) {
+        vec2 bc = uBang.xy;
+        vec2 away = center - bc;
+        float dist = length(away);
+        vec2 dir = dist > 1e-5 ? away / dist : vec2(1.0, 0.0);
+        float dn = clamp(dist / uBang.w, 0.0, 1.0);
+        float baseH = h;
+        // The swallowed picture ends up as a small glowing ember ball: cells keep
+        // their order (inner ones near the middle) and form a dome.
+        float emberR = ${EMBER_RADIUS.toFixed(3)};
+        vec2 ember = dir * emberR * dn;
+        float emberH = ${MIN_HEIGHT.toFixed(4)} + lift * 0.9 * (1.0 - dn);
+        float pulse = 0.78 + 0.22 * sin(uTime * 16.0);
+        if (bangAge < ${BANG_SUCK.toFixed(3)}) {
+            // The cells nearest the click go first and the hunger spreads outward;
+            // each one spirals in and joins the ember.
+            float tn = bangAge / ${BANG_SUCK.toFixed(3)};
+            float u = clamp((tn - dn * 0.3) / 0.7, 0.0, 1.0);
+            if (u > 0.0) {
+                float ue = u * u * (3.0 - 2.0 * u);
+                float ang = ue * 5.5;
+                float ca = cos(ang), sa = sin(ang);
+                float rad = mix(dist, emberR * dn, pow(u, 1.5));
+                vec2 p = vec2(ca * dir.x - sa * dir.y, sa * dir.x + ca * dir.y) * rad;
+                shift = bc + p - center;
+                h = mix(baseH, emberH, ue);
+                dark = max(dark, 0.4 * smoothstep(0.4, 1.0, u));
+                rim = max(rim, mix(smoothstep(0.1, 0.45, u) * (1.0 - smoothstep(0.55, 0.9, u)), pulse, smoothstep(0.85, 1.0, u)));
+            }
+        } else {
+            float te = (bangAge - ${(BANG_SUCK + BANG_VOID).toFixed(3)}) / ${BANG_BLAST.toFixed(3)};
+            float v = te < 0.0 ? 0.0 : clamp((te - dn * 0.45) / 0.55, 0.0, 1.0);
+            if (v <= 0.0) {
+                shift = bc + ember - center;
+                h = emberH;
+                dark = 0.4;
+                rim = pulse;
+            } else {
+                // Blast: cells are flung back to their places with a little overshoot.
+                float q = v - 1.0;
+                float e = 1.0 + 2.70158 * q * q * q + 1.70158 * q * q;
+                shift = (bc + ember - center) * (1.0 - e);
+                float rnd = fract(sin(dot(vec2(float(col), float(row)), vec2(12.9898, 78.233))) * 43758.5453);
+                zOff = sin(3.14159 * v) * (0.35 + 0.65 * rnd) * ${DEPTH_UNIT.toFixed(4)} * 2.4;
+                h = mix(emberH, baseH, 1.0 - pow(1.0 - v, 3.0));
+                dark = max(dark, 0.4 * (1.0 - smoothstep(0.0, 0.45, v)));
+                rim = max(rim, 1.0 - smoothstep(0.0, 0.4, v));
+            }
+        }
+    }
+
     // Ripples: expanding rings that lift the cells they pass over.
     for (int i = 0; i < ${MAX_RIPPLES}; i++) {
         vec4 r = uRipples[i];
@@ -143,7 +205,7 @@ void main() {
 
     // Columns span 0..h; floating tiles are a thin slab whose top sits at h.
     float thick = uCell.y * 0.12;
-    float z = uStyle == 1 ? h + (aPos.z - 1.0) * thick : aPos.z * h;
+    float z = (uStyle == 1 ? h + (aPos.z - 1.0) * thick : aPos.z * h) + zOff;
 
     vec2 inner = uGap * 0.5 + aPos.xy * (1.0 - uGap);
     vec3 world = vec3(
@@ -352,6 +414,7 @@ export class Relief3D {
         this._lastFrameT = 0;
         this._ripples = new Float32Array(MAX_RIPPLES * 4);
         this._rippleNext = 0;
+        this._bang = null;            // { x, y, t0, r } while the collapse plays
         this._clockT0 = performance.now();
 
         this.canvas = document.createElement('canvas');
@@ -486,7 +549,7 @@ export class Relief3D {
         this.u = {};
         for (const name of ['uFrame', 'uLayout', 'uGrid', 'uCell', 'uDepth', 'uGap', 'uInvert',
             'uViewProj', 'uAtlas', 'uGlyphs', 'uLight', 'uStyle',
-            'uTouchMode', 'uTouch', 'uTouchRadius', 'uTouchStrength', 'uTime', 'uRipples']) {
+            'uTouchMode', 'uTouch', 'uTouchRadius', 'uTouchStrength', 'uTime', 'uRipples', 'uBang']) {
             this.u[name] = gl.getUniformLocation(prog, name);
         }
 
@@ -623,7 +686,9 @@ export class Relief3D {
         const dt = this._lastFrameT ? Math.min(0.1, (now - this._lastFrameT) / 1000) : 0;
         this._lastFrameT = now;
         const mode = TOUCH_MODES[this.opts.touch] || 0;
-        const brush = mode >= 1 && mode <= 3 ? this._pointerWorld(this._pointer) : null;
+        const time0 = (now - this._clockT0) / 1000;
+        if (this._bang && time0 - this._bang.t0 > BANG_TOTAL) this._bang = null;
+        const brush = mode >= 1 && mode <= 3 && !this._bang ? this._pointerWorld(this._pointer) : null;
         const goal = brush ? 1 : 0;
         this._touchAmount += (goal - this._touchAmount) * Math.min(1, dt * 9);
         if (brush) this._touchXY = brush;
@@ -661,10 +726,12 @@ export class Relief3D {
         gl.uniform1f(u.uTouchStrength, Math.min(3, Math.max(0, this.opts.touchStrength)));
         gl.uniform1f(u.uTime, time);
         gl.uniform4fv(u.uRipples, this._ripples);
+        const bang = this._bang;
+        gl.uniform4f(u.uBang, bang ? bang.x : 0, bang ? bang.y : 0, bang ? bang.t0 : 0, bang ? bang.r : 0);
         gl.bindVertexArray(this.vao);
         gl.drawArraysInstanced(gl.TRIANGLES, 0, this.vertexCount, this.cols * this.rows);
         gl.bindVertexArray(null);
-        return ripplesAlive || Math.abs(goal - this._touchAmount) > 0.002;
+        return ripplesAlive || this._bang !== null || Math.abs(goal - this._touchAmount) > 0.002;
     }
 
     // Where the pointer ray meets the grid's mid-height plane, in world units.
@@ -684,6 +751,19 @@ export class Relief3D {
         const s = (this._touchPlaneZ - a[2]) / dz;
         if (s < 0) return null;
         return [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s];
+    }
+
+    // Start the collapse at the pointer (ignored while one is already playing).
+    _startBang(ndc) {
+        if (this._bang) return false;
+        const at = this._pointerWorld(ndc);
+        if (!at) return false;
+        const { width, height } = this._gridSize();
+        const r = Math.max(Math.hypot(at[0] - width / 2, at[1] - height / 2), Math.hypot(at[0] + width / 2, at[1] - height / 2),
+            Math.hypot(at[0] - width / 2, at[1] + height / 2), Math.hypot(at[0] + width / 2, at[1] + height / 2));
+        this._bang = { x: at[0], y: at[1], t0: (performance.now() - this._clockT0) / 1000, r: Math.max(r, 0.1) };
+        this.requestRender();
+        return true;
     }
 
     _spawnRipple(ndc) {
@@ -751,6 +831,9 @@ export class Relief3D {
             if (moved > 4) { e.stopPropagation(); e.preventDefault(); }
             else if (this.opts.touch === 'ripple') {
                 this._spawnRipple(this._ndc(e));
+                e.stopPropagation(); e.preventDefault();
+            } else if (this.opts.touch === 'hole') {
+                this._startBang(this._ndc(e));
                 e.stopPropagation(); e.preventDefault();
             }
             moved = 0;
