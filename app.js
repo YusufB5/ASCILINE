@@ -1203,7 +1203,7 @@ const filterReliefTouch  = document.getElementById('filter-relief-touch');
 const reliefPowerRow     = document.getElementById('relief-touch-power');
 const filterReliefPower  = document.getElementById('filter-relief-power');
 const reliefPowerVal     = document.getElementById('filter-relief-power-val');
-const RELIEF_TOUCH_MODES = ['off', 'hole', 'bump', 'repel', 'ripple'];
+const RELIEF_TOUCH_MODES = ['off', 'hole', 'bump', 'repel', 'ripple', 'blast', 'melt'];
 const filterReliefReset  = document.getElementById('filter-relief-reset');
 
 // ASCII modes always show their characters on the block tops; pixel mode never has any.
