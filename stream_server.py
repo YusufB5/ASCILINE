@@ -237,7 +237,7 @@ def calc_auto_dimensions(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_WHITELIST = {
     "app.js", "style.css", "codec.js", 
-    "src/asciline-player.js", "src/live-session.js", "src/index.js",
+    "src/asciline-player.js", "src/live-session.js", "src/index.js", "src/relief3d.js",
     "examples/quickstart.html", "examples/sdk-live.html"
 }
 
