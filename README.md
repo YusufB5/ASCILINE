@@ -623,6 +623,12 @@ Open the player settings (**FX** or **F**) and switch on **VIEW → 3D VIEW**. E
 - **Style** — `Columns` rise from the floor as solid blocks; `Floating` tiles hover at their height.
 - **Depth** — how far bright cells rise (0 = flat).
 - **Orbit** — slow automatic camera sway; **⟲** resets the camera.
+- **Touch** — the pointer reacts with the blocks; pick an effect with the **TOUCH** button and scale it with **POWER**:
+  - `Hole` — the blocks spiral into the cursor like a black hole; **click** and it swallows the whole picture, then blasts it back.
+  - `Bump` raises the blocks under the cursor, `Repel` pushes them aside, `Ripple` sends a wave from every click.
+  - `Blast` — **click** to throw the nearby blocks into the air; they tumble, land and slide back.
+  - `Melt` — **click** and the dark blocks drip down the picture while the bright ones stand, then it re-forms.
+  Clicks used by these effects do not pause the player (Space still does).
 
 The view uses WebGL2 and is loaded only when switched on; without WebGL2 the player stays 2D. Each frame is one texture upload and one draw call, so it runs smoothly on most desktop GPUs, but very large grids or weak devices may need fewer `--cols`. In text-only mode 1 (no colour data) each character's ink density sets its grey level and height. The module is `src/relief3d.js` and has no dependencies.
 
