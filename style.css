@@ -720,6 +720,9 @@ body {
     padding-left: 10px;
     border-left: 1px solid #333;
 }
+.filter-row[hidden] {
+    display: none;
+}
 .filter-subgroup[hidden],
 #palette-section[hidden] {
     display: none;
